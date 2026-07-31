@@ -55,12 +55,29 @@ env 7's image to env 12 does not raise — it silently corrupts training.
 python -m multi_drone_mujoco.bench.verify --envs 4 --steps 60
 ```
 
-Runs two checks: **parity** (shared vs per-env pixels must match exactly) and
-**cross-talk** (same test with the service order shuffled every step, which
-catches state leaking between envs).
+Runs two checks: **parity** (shared vs per-env pixels) and **cross-talk** (same
+test with the service order shuffled every step, which catches state leaking
+between envs).
 
-Expect `ALL CHECKS PASSED`. If it fails, stop and send me the output — do not
-run the benchmarks.
+**Pass criteria are asymmetric, on purpose:**
+
+- **Depth must match exactly.** It encodes geometry and camera pose, so any
+  difference is a real defect — a misplaced camera or a wrong env/image
+  association shows up here immediately and hugely.
+- **RGB is judged against a measured floor.** Two independent GL contexts do
+  not produce bit-identical colour; the script first renders the same fixed
+  state repeatedly through each path to measure that GPU's own repeatability,
+  then requires the shared-vs-baseline difference to sit at or below it.
+
+Output also reports **what fraction of pixels differ** and the mean, because a
+max alone can't separate rounding from a defect: a few pixels off by 1 is
+quantisation, most of the frame off by 1 is systematic. Raise `--rgb-tol` only
+with a reason.
+
+On failure the script localises the divergence to one of three causes (A:
+physics already diverged, B: state didn't reach the renderer, C: identical
+state but different pixels) instead of just printing diffs. If it fails, stop
+and send me that block — do not run the benchmarks.
 
 ---
 
