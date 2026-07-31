@@ -1,14 +1,22 @@
 """Example: Play/visualize a trained policy.
 
 Usage:
-    python -m multi_drone_mujoco.examples.play --model_path results/rl_hover/best_model.zip
+    # Live MuJoCo viewer window (default):
+    python -m multi_drone_mujoco.examples.play \
+        --model_path multi_drone_mujoco/examples/results/rl_hover/best_model.zip
+
+    # Headless (just print episode rewards, no window):
+    python -m multi_drone_mujoco.examples.play \
+        --model_path multi_drone_mujoco/examples/results/rl_hover/best_model.zip --render rgb_array
 """
 
 import argparse
+import time
+
 import numpy as np
 
 
-def play(model_path: str, env_type: str = "hover", episodes: int = 3):
+def play(model_path: str, env_type: str = "hover", episodes: int = 3, render: str = "human"):
     """Load and visualize a trained policy."""
     try:
         from stable_baselines3 import PPO
@@ -23,9 +31,12 @@ def play(model_path: str, env_type: str = "hover", episodes: int = 3):
     model = PPO.load(model_path)
 
     if env_type == "multi":
-        env = MultiHoverAviary(num_drones=2, ctrl_freq=48, sim_freq=240, render_mode="rgb_array")
+        env = MultiHoverAviary(num_drones=2, ctrl_freq=48, sim_freq=240, render_mode=render)
     else:
-        env = HoverAviary(ctrl_freq=48, sim_freq=240, render_mode="rgb_array")
+        env = HoverAviary(ctrl_freq=48, sim_freq=240, render_mode=render)
+
+    # Slow playback down to roughly real time so the window is watchable.
+    frame_dt = 1.0 / getattr(env, "CTRL_FREQ", 48)
 
     for ep in range(episodes):
         obs, info = env.reset()
@@ -37,6 +48,10 @@ def play(model_path: str, env_type: str = "hover", episodes: int = 3):
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += reward
             steps += 1
+
+            if render == "human":
+                env.render()
+                time.sleep(frame_dt)
 
             if terminated or truncated:
                 break
@@ -51,5 +66,12 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, required=True)
     parser.add_argument("--env_type", type=str, default="hover")
     parser.add_argument("--episodes", type=int, default=3)
+    parser.add_argument(
+        "--render",
+        type=str,
+        default="human",
+        choices=["human", "rgb_array"],
+        help="'human' opens a live MuJoCo viewer window; 'rgb_array' runs headless.",
+    )
     args = parser.parse_args()
-    play(args.model_path, args.env_type, args.episodes)
+    play(args.model_path, args.env_type, args.episodes, args.render)

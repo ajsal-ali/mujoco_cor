@@ -431,7 +431,7 @@ class BaseAviary(gym.Env):
 
         # Vision attributes
         if self.VISION_ATTR:
-            self.IMG_RES = np.array([64, 48])
+            self.IMG_RES = np.array([256, 256])
             self.IMG_FRAME_PER_SEC = 24
             self.IMG_CAPTURE_FREQ = int(self.SIM_FREQ / self.IMG_FRAME_PER_SEC)
             self.rgb = np.zeros((num_drones, self.IMG_RES[1], self.IMG_RES[0], 4), dtype=np.uint8)

@@ -140,7 +140,7 @@ def train_multi(total_timesteps: int = 200_000, output_dir: str = "results/rl_mu
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--multiagent", type=str, default="false")
-    parser.add_argument("--timesteps", type=int, default=100_000)
+    parser.add_argument("--timesteps", type=int, default=100)
     args = parser.parse_args()
 
     if args.multiagent.lower() == "true":
