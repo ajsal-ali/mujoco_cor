@@ -153,11 +153,34 @@ def main():
                          "(warm-start only; 0 disables)")
     ap.add_argument("--no-freeze-cnn", action="store_true",
                     help="also fine-tune the CNN during warm-start (less stable)")
+    ap.add_argument("--shared-renderers", type=int, default=0, metavar="M",
+                    help="share GL contexts across envs: run the n_envs envs in M "
+                         "worker processes, one renderer each, instead of one "
+                         "context per env. VRAM then scales with M, not n_envs, "
+                         "which is what lets n_envs grow. STATIC WORLDS ONLY -- "
+                         "you are asserting every env's world is identical and "
+                         "unchanging. Pick M with "
+                         "`python -m multi_drone_mujoco.bench.calibrate`, and run "
+                         "`python -m multi_drone_mujoco.bench.verify` first. "
+                         "0 (default) keeps the original one-context-per-env path.")
     args = ap.parse_args()
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
 
-    venv = SubprocVecEnv([make_env(i, args.seed, args.dolls) for i in range(args.n_envs)])
+    if args.shared_renderers > 0:
+        if args.dolls:
+            # Not a staticness problem in itself, but the flag is an assertion
+            # about the world and --dolls changes what that world contains.
+            print("[shared-render] note: --dolls set; all envs must still be identical")
+        from multi_drone_mujoco.vec import SharedRenderVecEnv
+        m = min(args.shared_renderers, args.n_envs)
+        print(f"[shared-render] {args.n_envs} envs across {m} renderer processes "
+              f"({m} GL contexts instead of {args.n_envs})")
+        venv = SharedRenderVecEnv(
+            [make_env(i, args.seed, args.dolls) for i in range(args.n_envs)],
+            n_workers=m, want_seg=False)
+    else:
+        venv = SubprocVecEnv([make_env(i, args.seed, args.dolls) for i in range(args.n_envs)])
     venv = VecMonitor(venv, info_keywords=("is_success",))
     eval_env = VecMonitor(DummyVecEnv([make_env(9999, args.seed, args.dolls)]),
                           info_keywords=("is_success",))

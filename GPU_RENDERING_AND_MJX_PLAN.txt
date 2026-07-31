@@ -1,0 +1,241 @@
+MuJoCo-drones-gym: GPU Rendering and Physics Plan
+=================================================
+
+1) What is happening now (current behavior)
+--------------------------------------------
+
+This repository currently has two separate execution paths:
+
+A) Standard environment path (CPU-centric simulation)
+- Main files:
+  - multi_drone_mujoco/envs/base_aviary.py
+  - multi_drone_mujoco/envs/hover_aviary.py
+  - multi_drone_mujoco/envs/velocity_aviary.py
+  - multi_drone_mujoco/envs/multi_hover_aviary.py
+  - multi_drone_mujoco/envs/fly_through_aviary.py
+  - multi_drone_mujoco/envs/formation_aviary.py
+  - multi_drone_mujoco/envs/race_aviary.py
+- What it does:
+  - Physics stepping, motion updates, rewards, terminations, truncations, and observations are handled in the normal MuJoCo + Python env loop.
+  - Rendering is done through MuJoCo renderer/viewer calls from the same env path.
+  - RGB, depth, and segmentation rendering exist, but observation modes currently expose KIN, RGB, and KIN_RGB.
+- Important implication:
+  - Running many standard envs does not automatically move physics/reward to GPU.
+  - Rendering and physics are separate concerns; rendering does not make simulation GPU-native.
+
+B) Vectorized MJX path (JAX/MJX acceleration path)
+- Main file:
+  - multi_drone_mujoco/vectorized/__init__.py
+- What it does:
+  - Uses JAX + MuJoCo MJX for vectorized stepping.
+  - Physics/reward/reset logic can execute on GPU if CUDA-capable JAX is installed.
+  - Provides a high-throughput training route for many parallel environments.
+- Important implication:
+  - This is the actual GPU-capable simulation path in the current codebase.
+
+Other relevant references:
+- Rendering demos and camera mode usage:
+  - render_demos.py
+  - render_demos2.py
+- Test coverage:
+  - multi_drone_mujoco/tests/test_envs.py
+  - multi_drone_mujoco/tests/test_features.py
+- Types/enums:
+  - multi_drone_mujoco/utils/enums.py
+- Package entry and exported envs:
+  - multi_drone_mujoco/__init__.py
+- Setup/optional dependencies:
+  - setup.py
+
+
+2) Why optimization is needed
+-----------------------------
+
+Goal context from discussion:
+- Many envs need camera outputs (RGBD-like needs) in static worlds with one/more drones.
+- Shared rendering can reduce redundant overhead, but one renderer can become a bottleneck.
+
+Key challenge:
+- One shared renderer context may serialize too much work under heavy env count/resolution/FPS demands.
+- Need an approach that preserves baseline speed while improving GPU utilization and rendering efficiency.
+
+
+3) Overall direction (high-level, not implementation-specific)
+---------------------------------------------------------------
+
+The optimization should be done in layers:
+
+Layer 1: Separate simulation throughput from image throughput
+- Keep simulation loop stable and predictable.
+- Make image generation a controllable pipeline (frequency, resolution, mode selection).
+
+Layer 2: Shared static-scene rendering strategy
+- Reuse static world assets and rendering contexts instead of recreating per env work.
+- Feed only changing per-env state (pose/camera state) into the render pipeline.
+
+Layer 3: Renderer pool instead of single renderer
+- Use multiple rendering workers/contexts for concurrency.
+- Avoid both extremes:
+  - Single renderer bottleneck.
+  - Too many render contexts causing overhead/memory pressure.
+
+Layer 4: Auto-tuned renderer pool sizing
+- Decide number of rendering workers dynamically (or at startup) based on:
+  - image resolution,
+  - requested FPS,
+  - enabled outputs (RGB only vs RGB+Depth+Seg),
+  - env count.
+- Choose the configuration that meets target latency/throughput with safe GPU headroom.
+
+Layer 5: Runtime adaptation and guardrails
+- Monitor queue depth and frame latency.
+- Scale renderer workers up/down when needed.
+- Fall back to safer mode if saturation is detected.
+
+
+4) What all is needed (scope of work)
+-------------------------------------
+
+A) Baseline profiling and metrics (before any major behavior change)
+- Measure current env step time and render time split.
+- Profile with representative workloads:
+  - env counts (e.g., 1, 8, 30),
+  - resolutions,
+  - RGB-only vs RGB+Depth(+Seg),
+  - frame rates.
+- Outcome: a baseline matrix used to verify no regressions.
+
+B) Rendering pipeline mode controls
+- Introduce clear mode selection between:
+  - existing per-env rendering behavior,
+  - shared static-scene rendering behavior.
+- Keep defaults backward compatible.
+
+C) Shared renderer pool strategy
+- Define a pool of rendering workers/contexts for static scenes.
+- Batch/schedule render requests from many env states across workers.
+- Return batched outputs with consistent shapes and ordering.
+
+D) Auto-tuning strategy for number of render workers
+- Short benchmark at startup (or calibration phase) to evaluate candidate pool sizes.
+- Pick best size based on throughput and latency targets.
+- Respect GPU memory limits and stability constraints.
+
+E) Runtime adaptive tuning
+- Collect lightweight runtime signals:
+  - queue wait time,
+  - render service time,
+  - dropped/late frame count.
+- Adjust pool size when saturation/underutilization is sustained.
+
+F) Integration with training/data loops
+- Ensure simulation loop does not stall unnecessarily on rendering.
+- Allow render decimation (render every N sim/control steps) where policy permits.
+- Ensure deterministic behavior where needed (especially evaluation mode).
+
+G) Validation and correctness checks
+- Verify output parity against existing renderer path:
+  - shape/type consistency,
+  - camera pose correctness,
+  - acceptable image similarity tolerance.
+- Ensure no behavior break in existing env APIs.
+
+H) Documentation updates
+- Clarify CPU vs GPU behavior by path:
+  - standard env path,
+  - MJX vectorized path,
+  - shared rendering optimization path.
+- Add practical guidance on when each path should be used.
+
+
+5) File reference map for planning
+----------------------------------
+
+Core simulation and rendering entry point
+- multi_drone_mujoco/envs/base_aviary.py
+  - step loop and physics application
+  - render() camera modes
+  - image extraction path (RGB/depth/segmentation)
+  - observation space and compute observation behavior
+
+Task envs relying on BaseAviary
+- multi_drone_mujoco/envs/hover_aviary.py
+- multi_drone_mujoco/envs/velocity_aviary.py
+- multi_drone_mujoco/envs/multi_hover_aviary.py
+- multi_drone_mujoco/envs/fly_through_aviary.py
+- multi_drone_mujoco/envs/formation_aviary.py
+- multi_drone_mujoco/envs/race_aviary.py
+
+Multi-agent adapter path
+- multi_drone_mujoco/envs/multi_agent_aviary.py
+
+GPU simulation path (MJX)
+- multi_drone_mujoco/vectorized/__init__.py
+
+Wrappers that may interact with rollout/render scheduling
+- multi_drone_mujoco/wrappers/wind.py
+- multi_drone_mujoco/wrappers/wind_wrapper.py
+- multi_drone_mujoco/wrappers/obstacles.py
+- multi_drone_mujoco/wrappers/curriculum.py
+- multi_drone_mujoco/wrappers/__init__.py
+
+Examples and practical runtime behavior
+- multi_drone_mujoco/examples/play.py
+- multi_drone_mujoco/examples/train_all_envs.py
+- multi_drone_mujoco/examples/train_rl.py
+- render_demos.py
+- render_demos2.py
+
+Tests to extend/maintain
+- multi_drone_mujoco/tests/test_envs.py
+- multi_drone_mujoco/tests/test_features.py
+- multi_drone_mujoco/tests/test_multi_agent.py
+- multi_drone_mujoco/tests/test_control.py
+
+Documentation and packaging touchpoints
+- README.md
+- setup.py
+- multi_drone_mujoco/__init__.py
+- multi_drone_mujoco/utils/enums.py
+
+
+6) Performance targets and acceptance criteria
+----------------------------------------------
+
+Primary outcomes:
+- Equal or better end-to-end training/rollout speed compared to current baseline.
+- Better GPU utilization for image-heavy workloads.
+- No regression in physics/reward correctness.
+
+Acceptance criteria:
+- Existing tests continue to pass.
+- Added tests validate shared rendering outputs and scheduler behavior.
+- Benchmarks demonstrate:
+  - no slowdown in baseline mode,
+  - measurable gain in targeted multi-env static-scene RGBD workloads.
+
+
+7) Risk areas to manage
+-----------------------
+
+- Rendering order/association errors (wrong frame mapped to wrong env state).
+- Latency spikes from oversubscribed renderer workers.
+- GPU memory pressure from high resolution + depth + segmentation.
+- Implicit coupling between render path and control loop timing.
+- Divergence between standard env and MJX path behavior expectations.
+
+
+8) Practical rollout sequence
+-----------------------------
+
+Recommended rollout order:
+1. Baseline profiling and metric collection.
+2. Add mode controls and keep existing path as default.
+3. Introduce shared static-scene renderer path (single worker first).
+4. Expand to renderer pool.
+5. Add startup auto-tuning and runtime adaptation.
+6. Add/extend tests and benchmark scripts.
+7. Update README and examples with clear usage guidance.
+
+This sequence minimizes risk and allows clear A/B performance checks at each stage.
+
