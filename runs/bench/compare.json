@@ -1,0 +1,118 @@
+{
+  "env": "multi_drone_mujoco.bench.env:BenchAviary",
+  "n_envs": 30,
+  "workers": 15,
+  "repeats": 3,
+  "want_seg": false,
+  "cpu_count": 64,
+  "mujoco_gl": "egl",
+  "gpu_name": "NVIDIA GeForce RTX 2080 Ti",
+  "vram_total_mb": 11264.0,
+  "sm_clock_mhz": 420,
+  "baseline_runs": [
+    {
+      "env_steps_per_sec": 1596.3,
+      "vec_step": {
+        "mean_ms": 18.792,
+        "p50_ms": 18.712,
+        "p99_ms": 20.213,
+        "max_ms": 26.668
+      },
+      "host_rss_mb": 26401.3,
+      "vram_peak_mb": 2810.3,
+      "vram_mean_mb": 2810.3,
+      "gpu_util_mean_pct": 79.4,
+      "contexts": 30
+    },
+    {
+      "env_steps_per_sec": 1622.2,
+      "vec_step": {
+        "mean_ms": 18.493,
+        "p50_ms": 18.478,
+        "p99_ms": 20.251,
+        "max_ms": 22.601
+      },
+      "host_rss_mb": 26427.4,
+      "vram_peak_mb": 2832.3,
+      "vram_mean_mb": 2829.7,
+      "gpu_util_mean_pct": 80.9,
+      "contexts": 30
+    },
+    {
+      "env_steps_per_sec": 1606.2,
+      "vec_step": {
+        "mean_ms": 18.677,
+        "p50_ms": 18.668,
+        "p99_ms": 19.849,
+        "max_ms": 20.589
+      },
+      "host_rss_mb": 26426.6,
+      "vram_peak_mb": 2811.9,
+      "vram_mean_mb": 2811.9,
+      "gpu_util_mean_pct": 79.6,
+      "contexts": 30
+    }
+  ],
+  "shared_runs": [
+    {
+      "env_steps_per_sec": 2009.8,
+      "vec_step": {
+        "mean_ms": 14.926,
+        "p50_ms": 14.589,
+        "p99_ms": 19.699,
+        "max_ms": 20.357
+      },
+      "host_rss_mb": 13891.4,
+      "vram_peak_mb": 1882.5,
+      "vram_mean_mb": 1882.1,
+      "gpu_util_mean_pct": 66.4,
+      "contexts": 15
+    },
+    {
+      "env_steps_per_sec": 2247.7,
+      "vec_step": {
+        "mean_ms": 13.346,
+        "p50_ms": 13.02,
+        "p99_ms": 18.084,
+        "max_ms": 20.152
+      },
+      "host_rss_mb": 13925.0,
+      "vram_peak_mb": 1880.2,
+      "vram_mean_mb": 1871.9,
+      "gpu_util_mean_pct": 68.6,
+      "contexts": 15
+    },
+    {
+      "env_steps_per_sec": 2237.2,
+      "vec_step": {
+        "mean_ms": 13.408,
+        "p50_ms": 13.065,
+        "p99_ms": 18.15,
+        "max_ms": 19.98
+      },
+      "host_rss_mb": 13924.4,
+      "vram_peak_mb": 1840.8,
+      "vram_mean_mb": 1840.8,
+      "gpu_util_mean_pct": 68.2,
+      "contexts": 15
+    }
+  ],
+  "baseline": {
+    "repeats": 3,
+    "contexts": 30,
+    "env_steps_per_sec_median": 1606.2,
+    "env_steps_per_sec_spread_pct": 1.6,
+    "vec_step_p99_ms_median": 20.213,
+    "vram_peak_mb_median": 2811.9,
+    "host_rss_mb_median": 26426.6
+  },
+  "shared": {
+    "repeats": 3,
+    "contexts": 15,
+    "env_steps_per_sec_median": 2237.2,
+    "env_steps_per_sec_spread_pct": 10.6,
+    "vec_step_p99_ms_median": 18.15,
+    "vram_peak_mb_median": 1880.2,
+    "host_rss_mb_median": 13924.4
+  }
+}

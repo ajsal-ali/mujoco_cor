@@ -1,0 +1,157 @@
+{
+  "label": "shared renderer \u2014 M sweep",
+  "env": "multi_drone_mujoco.bench.env:BenchAviary",
+  "n_envs": 30,
+  "want_seg": false,
+  "cpu_count": 64,
+  "mujoco_gl": "egl",
+  "gpu_name": "NVIDIA GeForce RTX 2080 Ti",
+  "vram_total_mb": 11264.0,
+  "sm_clock_mhz": 420,
+  "sweep": [
+    {
+      "n_workers": 1,
+      "envs_per_worker_max": 30,
+      "env_steps_per_sec": 762.0,
+      "vec_step": {
+        "mean_ms": 39.367,
+        "p50_ms": 38.708,
+        "p99_ms": 49.297,
+        "max_ms": 49.488
+      },
+      "host_rss_mb": 2102.1,
+      "renderer_raster_mean_ms": 0.6245,
+      "renderer_raster_p99_ms": 2.4207,
+      "vram_peak_mb": 948.4,
+      "vram_mean_mb": 943.4,
+      "gpu_util_mean_pct": 30.7
+    },
+    {
+      "n_workers": 2,
+      "envs_per_worker_max": 15,
+      "env_steps_per_sec": 1294.5,
+      "vec_step": {
+        "mean_ms": 23.174,
+        "p50_ms": 22.891,
+        "p99_ms": 29.571,
+        "max_ms": 32.048
+      },
+      "host_rss_mb": 3006.9,
+      "renderer_raster_mean_ms": 0.737,
+      "renderer_raster_p99_ms": 1.5007,
+      "vram_peak_mb": 1006.7,
+      "vram_mean_mb": 1003.6,
+      "gpu_util_mean_pct": 43.8
+    },
+    {
+      "n_workers": 3,
+      "envs_per_worker_max": 10,
+      "env_steps_per_sec": 1702.3,
+      "vec_step": {
+        "mean_ms": 17.622,
+        "p50_ms": 17.398,
+        "p99_ms": 23.296,
+        "max_ms": 24.117
+      },
+      "host_rss_mb": 3870.3,
+      "renderer_raster_mean_ms": 0.9049,
+      "renderer_raster_p99_ms": 1.8561,
+      "vram_peak_mb": 1067.1,
+      "vram_mean_mb": 1067.1,
+      "gpu_util_mean_pct": 55.0
+    },
+    {
+      "n_workers": 5,
+      "envs_per_worker_max": 6,
+      "env_steps_per_sec": 1877.6,
+      "vec_step": {
+        "mean_ms": 15.975,
+        "p50_ms": 15.74,
+        "p99_ms": 21.316,
+        "max_ms": 22.431
+      },
+      "host_rss_mb": 5567.9,
+      "renderer_raster_mean_ms": 1.3458,
+      "renderer_raster_p99_ms": 2.6851,
+      "vram_peak_mb": 1200.4,
+      "vram_mean_mb": 1200.4,
+      "gpu_util_mean_pct": 60.2
+    },
+    {
+      "n_workers": 6,
+      "envs_per_worker_max": 5,
+      "env_steps_per_sec": 2141.7,
+      "vec_step": {
+        "mean_ms": 14.006,
+        "p50_ms": 13.913,
+        "p99_ms": 17.282,
+        "max_ms": 18.983
+      },
+      "host_rss_mb": 6417.8,
+      "renderer_raster_mean_ms": 1.6,
+      "renderer_raster_p99_ms": 3.0668,
+      "vram_peak_mb": 1241.1,
+      "vram_mean_mb": 1241.1,
+      "gpu_util_mean_pct": 65.4
+    },
+    {
+      "n_workers": 10,
+      "envs_per_worker_max": 3,
+      "env_steps_per_sec": 2243.0,
+      "vec_step": {
+        "mean_ms": 13.374,
+        "p50_ms": 13.177,
+        "p99_ms": 16.938,
+        "max_ms": 17.377
+      },
+      "host_rss_mb": 9736.5,
+      "renderer_raster_mean_ms": 2.8763,
+      "renderer_raster_p99_ms": 5.1698,
+      "vram_peak_mb": 1500.2,
+      "vram_mean_mb": 1500.2,
+      "gpu_util_mean_pct": 68.4
+    },
+    {
+      "n_workers": 15,
+      "envs_per_worker_max": 2,
+      "env_steps_per_sec": 2264.1,
+      "vec_step": {
+        "mean_ms": 13.249,
+        "p50_ms": 13.136,
+        "p99_ms": 15.713,
+        "max_ms": 17.114
+      },
+      "host_rss_mb": 13867.8,
+      "renderer_raster_mean_ms": 4.2568,
+      "renderer_raster_p99_ms": 8.5931,
+      "vram_peak_mb": 1824.1,
+      "vram_mean_mb": 1824.1,
+      "gpu_util_mean_pct": 69.9
+    },
+    {
+      "n_workers": 30,
+      "envs_per_worker_max": 1,
+      "env_steps_per_sec": 2160.9,
+      "vec_step": {
+        "mean_ms": 13.882,
+        "p50_ms": 13.845,
+        "p99_ms": 16.325,
+        "max_ms": 19.105
+      },
+      "host_rss_mb": 26382.2,
+      "renderer_raster_mean_ms": 8.0685,
+      "renderer_raster_p99_ms": 12.0703,
+      "vram_peak_mb": 2795.9,
+      "vram_mean_mb": 2795.9,
+      "gpu_util_mean_pct": 68.9
+    }
+  ],
+  "recommendation": {
+    "recommended_workers": 15,
+    "best_p99_ms": 15.713,
+    "accepted_p99_ms": 15.713,
+    "tolerance": 0.05,
+    "vram_peak_mb": 1824.1,
+    "env_steps_per_sec": 2264.1
+  }
+}

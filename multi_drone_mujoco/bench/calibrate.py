@@ -152,7 +152,7 @@ def main():
     p.add_argument("--seg", action="store_true")
     p.add_argument("--tolerance", type=float, default=0.05,
                    help="accept M whose p99 is within this fraction of the best")
-    p.add_argument("--out", default="runs/bench/calibrate")
+    p.add_argument("--out", default="runs/bench/60hz_calibrate", help="base path for .json and .png output")
     args = p.parse_args()
 
     n = args.n_envs

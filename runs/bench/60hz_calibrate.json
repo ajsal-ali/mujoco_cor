@@ -1,0 +1,38 @@
+{
+  "label": "shared renderer \u2014 M sweep",
+  "env": "multi_drone_mujoco.bench.env:BenchAviary",
+  "n_envs": 60,
+  "want_seg": false,
+  "cpu_count": 64,
+  "mujoco_gl": "egl",
+  "gpu_name": "NVIDIA GeForce RTX 2080 Ti",
+  "vram_total_mb": 11264.0,
+  "sm_clock_mhz": 540,
+  "sweep": [
+    {
+      "n_workers": 15,
+      "envs_per_worker_max": 4,
+      "env_steps_per_sec": 2412.3,
+      "vec_step": {
+        "mean_ms": 24.871,
+        "p50_ms": 24.678,
+        "p99_ms": 27.624,
+        "max_ms": 30.059
+      },
+      "host_rss_mb": 14542.2,
+      "renderer_raster_mean_ms": 4.38,
+      "renderer_raster_p99_ms": 8.7871,
+      "vram_peak_mb": 1842.7,
+      "vram_mean_mb": 1839.3,
+      "gpu_util_mean_pct": 82.3
+    }
+  ],
+  "recommendation": {
+    "recommended_workers": 15,
+    "best_p99_ms": 27.624,
+    "accepted_p99_ms": 27.624,
+    "tolerance": 0.05,
+    "vram_peak_mb": 1842.7,
+    "env_steps_per_sec": 2412.3
+  }
+}
