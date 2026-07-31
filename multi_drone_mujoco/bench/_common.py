@@ -14,7 +14,9 @@ import numpy as np
 # env factory resolution
 # --------------------------------------------------------------------------
 
-DEFAULT_ENV = "rl.window_aviary:WindowAviary"
+# Self-contained static-world env: no external assets, no task-repo imports.
+# Override with --env 'module:Class' to benchmark a real task env instead.
+DEFAULT_ENV = "multi_drone_mujoco.bench.env:BenchAviary"
 
 
 def resolve_env_class(spec: str):

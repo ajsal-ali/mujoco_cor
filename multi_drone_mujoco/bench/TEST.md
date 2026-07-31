@@ -23,6 +23,27 @@ pip install pynvml psutil matplotlib     # VRAM, host RAM, plots
 All optional, but without `pynvml` you lose the VRAM curve — which is the main
 result. Install them.
 
+### Which env gets benchmarked
+
+Everything defaults to `multi_drone_mujoco.bench.env:BenchAviary` — a
+self-contained static world with a procedurally textured arena. No external
+asset files, no imports from `rl/`.
+
+That matters right now because **`rl.window_aviary` cannot be imported**: it
+imports `imav_play` and `imav_teleop` (deleted in commit `fa05718`), and the
+`Files(3)/` asset tree holding the IMAV world is gone from the working tree
+too. Both `.py` files are recoverable from commit `1241352` if you want them
+back; the SDF/texture assets would need to come from wherever you keep them.
+
+**Scene weight is the knob that matters.** VRAM per GL context is driven by how
+much geometry and texture the world holds, and that is exactly what shared
+rendering saves. `BenchAviary(n_clutter=N)` sets it — default 24 textured
+boxes. A light scene *understates* the saving. Before trusting the numbers as a
+proxy for your real arena, raise `n_clutter` until per-env `vram_peak_mb` in
+step 2 is in the same range as that arena's.
+
+To benchmark a real task env instead, pass `--env 'module:Class'` to any script.
+
 ---
 
 ## 1. Verify correctness FIRST (~1 min)
@@ -133,6 +154,10 @@ python -m rl.train_window --n-envs 30 --shared-renderers <M> --timesteps 2000000
 
 `--shared-renderers 0` (default) keeps the original path unchanged.
 
+This step needs `rl.window_aviary` importable — see the note in §0. The flag
+and the VecEnv are wired up and independent of that; only this command is
+blocked by the missing `imav_play` / `Files(3)`.
+
 Note: more envs changes PPO's batch (`n_envs × n_steps`), so throughput gains
 don't convert one-for-one into faster convergence without retuning `n_steps` /
 `batch_size` / LR. Out of scope here, but it's why "3× the env-steps/sec" won't
@@ -157,3 +182,6 @@ read as "3× faster to a good policy".
 - **`rl/README.md`** still claims no files in `multi_drone_mujoco/` are
   modified. That's no longer true: `base_aviary.py` gained the shared-renderer
   hook and the segmentation opt-out. Needs updating.
+- **`rl/window_aviary.py` and `rl/_viewer.py` are broken** independently of this
+  work — they import `imav_play` / `imav_teleop`, which no longer exist. The
+  benchmarks route around it; training does not.
