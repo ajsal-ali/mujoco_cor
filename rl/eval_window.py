@@ -18,10 +18,9 @@ from rl._viewer import run_viewer
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", type=str, required=True)
-    ap.add_argument("--dolls", action="store_true")
     args = ap.parse_args()
 
-    env = WindowAviary(include_dolls=args.dolls)
+    env = WindowAviary()
     model = PPO.load(args.model, device="cpu")
 
     results = {"pass": 0, "crash": 0}

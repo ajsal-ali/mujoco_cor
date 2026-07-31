@@ -27,9 +27,9 @@ from rl.window_aviary import WindowAviary
 from rl.light_cnn import POLICY_KWARGS
 
 
-def make_env(rank: int, seed: int = 0, dolls: bool = False):
+def make_env(rank: int, seed: int = 0):
     def _init():
-        return WindowAviary(seed=seed + rank, include_dolls=dolls)
+        return WindowAviary(seed=seed + rank)
     return _init
 
 
@@ -145,7 +145,6 @@ def main():
     ap.add_argument("--init", type=str, default=None, help="BC-pretrained .zip to warm-start from")
     ap.add_argument("--out", type=str, default="runs/window")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--dolls", action="store_true")
     ap.add_argument("--plot", action="store_true",
                     help="live matplotlib curves (updated once per rollout; needs a display)")
     ap.add_argument("--critic-warmup", type=int, default=30000,
@@ -159,30 +158,33 @@ def main():
                          "context per env. VRAM then scales with M, not n_envs, "
                          "which is what lets n_envs grow. STATIC WORLDS ONLY -- "
                          "you are asserting every env's world is identical and "
-                         "unchanging. Pick M with "
+                         "unchanging. WindowAviary satisfies this. Pick M with "
                          "`python -m multi_drone_mujoco.bench.calibrate`, and run "
                          "`python -m multi_drone_mujoco.bench.verify` first. "
                          "0 (default) keeps the original one-context-per-env path.")
+    ap.add_argument("--state-transfer", default="copy", choices=("copy", "minimal"),
+                    help="how env state reaches the shared renderer. 'copy' "
+                         "(default) transfers the whole MjData and is exact; "
+                         "'minimal' copies qpos and recomputes poses -- faster, "
+                         "but only use it if bench.verify passes with it.")
     args = ap.parse_args()
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
 
     if args.shared_renderers > 0:
-        if args.dolls:
-            # Not a staticness problem in itself, but the flag is an assertion
-            # about the world and --dolls changes what that world contains.
-            print("[shared-render] note: --dolls set; all envs must still be identical")
         from multi_drone_mujoco.vec import SharedRenderVecEnv
         m = min(args.shared_renderers, args.n_envs)
         print(f"[shared-render] {args.n_envs} envs across {m} renderer processes "
-              f"({m} GL contexts instead of {args.n_envs})")
+              f"({m} GL contexts instead of {args.n_envs}, "
+              f"state_transfer={args.state_transfer})")
         venv = SharedRenderVecEnv(
-            [make_env(i, args.seed, args.dolls) for i in range(args.n_envs)],
-            n_workers=m, want_seg=False)
+            [make_env(i, args.seed) for i in range(args.n_envs)],
+            n_workers=m, want_seg=False, state_transfer=args.state_transfer)
     else:
-        venv = SubprocVecEnv([make_env(i, args.seed, args.dolls) for i in range(args.n_envs)])
+        venv = SubprocVecEnv([make_env(i, args.seed) for i in range(args.n_envs)])
     venv = VecMonitor(venv, info_keywords=("is_success",))
-    eval_env = VecMonitor(DummyVecEnv([make_env(9999, args.seed, args.dolls)]),
+    # Single eval env: one context either way, so it keeps the plain path.
+    eval_env = VecMonitor(DummyVecEnv([make_env(9999, args.seed)]),
                           info_keywords=("is_success",))
 
     ppo_kwargs = dict(

@@ -17,7 +17,7 @@ import numpy as np
 import mujoco
 import mujoco.viewer
 
-from imav_play import _onboard_window
+from rl._onboard import onboard_window as _onboard_window
 
 _SPIN_DIRS = [1.0, -1.0, 1.0, -1.0]
 _VIS_SPIN = 55.0

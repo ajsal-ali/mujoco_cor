@@ -66,6 +66,9 @@ python -m rl.bc_pretrain --demos demos.npz --out runs/bc_init.zip --epochs 15
 # 4. Train PPO, warm-started from BC, fully headless across many envs
 python -m rl.train_window --init runs/bc_init.zip --n-envs 8 --timesteps 2000000
 
+#    Many envs? Share GL contexts so VRAM stops being the limit (see below):
+python -m rl.train_window --n-envs 30 --shared-renderers 6 --timesteps 2000000
+
 # 5. Watch the result (3rd-person viewer + live onboard RGB-D)
 python -m rl.eval_window --model runs/window/best_model.zip
 ```
@@ -83,6 +86,53 @@ H       hover (zero)         (mouse: orbit / pan / zoom)
 ```
 
 Click the 3rd-person window first so it has keyboard focus.
+
+---
+
+## Shared rendering (`--shared-renderers M`)
+
+By default every env builds its own `mujoco.Renderer`, so `--n-envs 30` means
+**30 GL contexts and 30 identical copies of the arena in VRAM**. The world here
+is static, so those copies never change — and VRAM, not compute, is what stops
+you raising `--n-envs`.
+
+`--shared-renderers M` runs the N envs in **M** worker processes with one
+renderer each, so VRAM scales with M instead of N. Total rasterisation work is
+unchanged (still N images per step); what drops is context count, VRAM and
+CPU-side scene setup. The point is being able to run *more* envs, not making a
+fixed N faster.
+
+```bash
+# correctness first — shared vs per-env pixels on this env
+python -m multi_drone_mujoco.bench.verify --env rl.window_aviary:WindowAviary --envs 4
+
+# pick M from measured step latency (smallest M that doesn't make envs wait)
+python -m multi_drone_mujoco.bench.calibrate --env rl.window_aviary:WindowAviary --n-envs 30
+
+# old vs new, interleaved repeats
+python -m multi_drone_mujoco.bench.compare --env rl.window_aviary:WindowAviary \
+       --n-envs 30 --workers <M>
+
+# then train
+python -m rl.train_window --n-envs 30 --shared-renderers <M> --timesteps 2000000
+```
+
+- `--shared-renderers 0` (default) keeps the original one-context-per-env path.
+- `--state-transfer copy` (default) transfers the whole `MjData` to the shared
+  renderer and is exact. `minimal` copies `qpos` and recomputes poses — faster,
+  but only use it if `bench.verify` passes with it.
+- **Static, identical worlds only.** You are asserting that; it is never
+  auto-detected, because a wrong assertion produces wrong pixels rather than an
+  error. `WindowAviary` satisfies it.
+- Verify checks depth exactly (it encodes geometry and camera pose) but judges
+  RGB against a *measured* repeatability floor — two independent GL contexts
+  don't produce bit-identical colour, so a ±1 LSB difference is quantisation,
+  not a fault.
+- More envs changes PPO's batch (`n_envs × n_steps`), so extra throughput won't
+  convert one-for-one into faster convergence without retuning `n_steps` /
+  `batch_size` / LR.
+
+Details and the full run order: `multi_drone_mujoco/bench/TEST.md`.
 
 ---
 

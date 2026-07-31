@@ -25,10 +25,9 @@ def main():
     ap.add_argument("--out", type=str, default="demos.npz")
     ap.add_argument("--keep-crashes", action="store_true",
                     help="also keep crashed episodes (default: successes only)")
-    ap.add_argument("--dolls", action="store_true")
     args = ap.parse_args()
 
-    env = WindowAviary(include_dolls=args.dolls)
+    env = WindowAviary()
     teleop = KeyTeleop()
 
     master = {"image": [], "proprio": [], "action": []}

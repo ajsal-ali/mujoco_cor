@@ -22,12 +22,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["teleop", "policy", "idle"], default="teleop")
     ap.add_argument("--model", type=str, default=None, help="policy .zip (implies --mode policy)")
-    ap.add_argument("--dolls", action="store_true")
     args = ap.parse_args()
     if args.model:
         args.mode = "policy"
 
-    env = WindowAviary(include_dolls=args.dolls)
+    env = WindowAviary()
 
     if args.mode == "policy":
         from stable_baselines3 import PPO

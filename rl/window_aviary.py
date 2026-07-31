@@ -2,15 +2,16 @@
 """WindowAviary — vision-based RL env for traversing the red window.
 
 Built entirely on the repo's BaseAviary (real CF2 drone + PIDControl velocity
-engine + onboard-camera renderer). The only addition is the IMAV world, injected
-at runtime via imav_play.make_world_injector (no repo files edited).
+engine + onboard-camera renderer). The arena is injected at runtime via
+rl.window_world.make_window_world_injector — generated geometry, no SDF and no
+external asset files, so this runs from a clean checkout.
 
 Design (see plan):
   * Observation = Dict{ image: onboard RGB-D 84x84x4 (uint8),
                         proprio: [grav_dir_body(3), angvel_body(3), vel_body(3)] }
     -> NO privileged window pose in the observation (vision only + IMU-realizable).
   * Action = continuous velocity [vx, vy, vz, yaw_rate] in [-1,1], scaled to m/s
-    and driven through PIDControl as a pure velocity set-point (as in imav_play).
+    and driven through PIDControl as a pure velocity set-point.
   * Reward / termination MAY use the known window geometry (privileged, sim-only):
     waypoint-progress + traversal check + collision + time. See WindowGate.
 
@@ -27,11 +28,10 @@ import gymnasium as gym
 from gymnasium import spaces
 import mujoco
 
-# make the parent dir (with imav_play / imav_teleop / the package) importable
+# make the parent dir (with the package) importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from imav_play import make_world_injector                      # noqa: E402
-from imav_teleop import DEFAULT_SDF                             # noqa: E402
+from rl.window_world import make_window_world_injector          # noqa: E402
 from multi_drone_mujoco.envs import base_aviary as _BA          # noqa: E402
 from multi_drone_mujoco.envs.base_aviary import BaseAviary      # noqa: E402
 from multi_drone_mujoco.control.pid_control import PIDControl   # noqa: E402
@@ -44,7 +44,12 @@ from multi_drone_mujoco.utils.enums import (                    # noqa: E402
 # ---------------------------------------------------------------------------
 
 class WindowGate:
-    """The RED window (obstacle wall at y=3.30). Values from the SDF.
+    """The RED window (obstacle wall at y=3.30).
+
+    These values are the ground truth for both the reward and the arena:
+    rl.window_world builds the wall to match them exactly. Change them and the
+    world changes with them -- they must never drift apart, or the reward would
+    score traversals against geometry the drone cannot see.
 
     Flyable opening: x in [0.44, 1.32], z in [2.97, 3.85], plane y = 3.30.
     (The blue window is the mirror opening at x in [-1.32, 0.0].)
@@ -116,7 +121,7 @@ class WindowAviary(BaseAviary):
     K_CENTER = 0.1        # per-step, applied near the plane
     K_CENTER_CROSS = 10.0 # bonus at the crossing for a well-centered pass
 
-    def __init__(self, sdf_path=None, include_dolls=False, seed=None):
+    def __init__(self, seed=None, posts=True):
         self.gate = WindowGate()
         self.spawn = SpawnConfig()
         self._rng = np.random.default_rng(seed)
@@ -127,9 +132,8 @@ class WindowAviary(BaseAviary):
         self.cur_action = np.zeros(4)
         self.prev_action = np.zeros(4)
 
-        sdf = sdf_path or DEFAULT_SDF
-        BA, original, patched = make_world_injector(sdf, include_dolls)
-        BA._generate_aviary_xml = patched
+        original, patched = make_window_world_injector(posts=posts)
+        _BA._generate_aviary_xml = patched
         try:
             super().__init__(
                 drone_model=DroneModel.CF2X, num_drones=1,
@@ -140,7 +144,7 @@ class WindowAviary(BaseAviary):
                 obs_type=ObservationType.KIN, act_type=ActionType.RPM,
             )
         finally:
-            BA._generate_aviary_xml = original
+            _BA._generate_aviary_xml = original
 
         # onboard camera resolution (renderer built lazily from IMG_RES)
         self.IMG_RES = np.array([self.IMG_W, self.IMG_H])
@@ -299,9 +303,9 @@ class WindowAviary(BaseAviary):
         return obs, info
 
 
-def make_window_env(seed=None, include_dolls=False):
+def make_window_env(seed=None):
     """Factory for SubprocVecEnv / make_vec_env."""
-    return WindowAviary(seed=seed, include_dolls=include_dolls)
+    return WindowAviary(seed=seed)
 
 
 if __name__ == "__main__":
