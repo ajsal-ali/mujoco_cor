@@ -73,12 +73,27 @@ class SharedStaticRenderer:
         segmentation should leave this off.
     """
 
+    #: How much of the calling env's MjData is transferred before rendering.
+    #:
+    #: "copy"    -- mj_copyData: the whole state. Exact by construction, and the
+    #:              only mode that is correct without reasoning about which
+    #:              fields mjv_updateScene happens to read.
+    #: "minimal" -- copy qpos/mocap and recompute poses with mj_kinematics +
+    #:              mj_camlight. Cheaper, but only valid if those are genuinely
+    #:              sufficient. Must be proven with bench/verify.py before use.
+    STATE_TRANSFER_MODES = ("copy", "minimal")
+
     def __init__(self, model: "mujoco.MjModel", width: int, height: int,
-                 want_seg: bool = False):
+                 want_seg: bool = False, state_transfer: str = "copy"):
+        if state_transfer not in self.STATE_TRANSFER_MODES:
+            raise ValueError(
+                f"state_transfer must be one of {self.STATE_TRANSFER_MODES}, "
+                f"got {state_transfer!r}")
         self.model = model
         self.width = int(width)
         self.height = int(height)
         self.default_want_seg = bool(want_seg)
+        self.state_transfer = state_transfer
 
         self._renderer = mujoco.Renderer(model, height=self.height, width=self.width)
         # Scratch data used only for rendering. Never stepped -- it holds a
@@ -131,18 +146,18 @@ class SharedStaticRenderer:
         t0 = time.perf_counter()
 
         s = self._scratch
-        # qpos fully determines geometry for a static world. mocap is copied too
-        # so worlds driven by mocap bodies stay correct.
-        s.qpos[:] = data.qpos
-        if self.model.nmocap:
-            s.mocap_pos[:] = data.mocap_pos
-            s.mocap_quat[:] = data.mocap_quat
-
-        # Only the pose pipeline is needed -- not a full mj_forward. These two
-        # produce body/geom xpos+xmat and camera/light poses, which is exactly
-        # what mjv_updateScene reads.
-        mujoco.mj_kinematics(self.model, s)
-        mujoco.mj_camlight(self.model, s)
+        if self.state_transfer == "copy":
+            # Whole-state copy. Slightly more work than recomputing poses, but
+            # it cannot miss a field that the scene builder reads, which the
+            # "minimal" path demonstrably could.
+            mujoco.mj_copyData(s, self.model, data)
+        else:
+            s.qpos[:] = data.qpos
+            if self.model.nmocap:
+                s.mocap_pos[:] = data.mocap_pos
+                s.mocap_quat[:] = data.mocap_quat
+            mujoco.mj_kinematics(self.model, s)
+            mujoco.mj_camlight(self.model, s)
 
         t1 = time.perf_counter()
 
@@ -186,7 +201,8 @@ class SharedStaticRenderer:
 
 
 def attach_shared_renderer(envs, want_seg: bool = False,
-                           renderer: Optional[SharedStaticRenderer] = None
+                           renderer: Optional[SharedStaticRenderer] = None,
+                           state_transfer: str = "copy"
                            ) -> SharedStaticRenderer:
     """Point a list of same-process envs at one shared renderer.
 
@@ -199,7 +215,7 @@ def attach_shared_renderer(envs, want_seg: bool = False,
     if renderer is None:
         renderer = SharedStaticRenderer(
             head.model, width=int(head.IMG_RES[0]), height=int(head.IMG_RES[1]),
-            want_seg=want_seg,
+            want_seg=want_seg, state_transfer=state_transfer,
         )
 
     for e in envs:

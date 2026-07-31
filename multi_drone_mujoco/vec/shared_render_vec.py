@@ -75,7 +75,8 @@ def _split_indices(n_envs: int, n_workers: int) -> List[List[int]]:
 # worker
 # --------------------------------------------------------------------------
 
-def _worker(remote, parent_remote, env_fns_wrapper, want_seg: bool) -> None:
+def _worker(remote, parent_remote, env_fns_wrapper, want_seg: bool,
+            state_transfer: str) -> None:
     parent_remote.close()
     env_fns = env_fns_wrapper.var
     envs = [fn() for fn in env_fns]
@@ -90,6 +91,7 @@ def _worker(remote, parent_remote, env_fns_wrapper, want_seg: bool) -> None:
             width=int(head.IMG_RES[0]),
             height=int(head.IMG_RES[1]),
             want_seg=want_seg,
+            state_transfer=state_transfer,
         )
         for e in envs:
             renderer.assert_compatible(e.model, "drone0_cam")
@@ -190,7 +192,8 @@ class SharedRenderVecEnv(VecEnv):
     """
 
     def __init__(self, env_fns: List[Callable[[], gym.Env]], n_workers: int,
-                 want_seg: bool = False, start_method: Optional[str] = None):
+                 want_seg: bool = False, start_method: Optional[str] = None,
+                 state_transfer: str = "copy"):
         self.waiting = False
         self.closed = False
         n_envs = len(env_fns)
@@ -212,7 +215,8 @@ class SharedRenderVecEnv(VecEnv):
             fns = [env_fns[i] for i in group]
             proc = ctx.Process(
                 target=_worker,
-                args=(work_remote, remote, CloudpickleWrapper(fns), want_seg),
+                args=(work_remote, remote, CloudpickleWrapper(fns), want_seg,
+                      state_transfer),
                 daemon=True,
             )
             proc.start()
