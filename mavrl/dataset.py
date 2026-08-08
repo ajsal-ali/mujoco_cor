@@ -14,6 +14,7 @@ keeps them:
     ep_start   (M,)          int64    episode boundaries into N
     ep_len     (M,)          int64
     ep_layout  (M,)          <U64     layout descriptor, for stratification
+    ep_source  (M,)          <U16     "scripted" | "manual" -- survives a merge
     gate_flags (N,)          uint8    gates cleared as of this frame
 
 Sharded per batch of episodes: at 128^2 with RGB-D, clean RGB-D, seg and depth,
@@ -49,8 +50,10 @@ class ShardWriter:
                      "action", "gate_flags")}
         self.ep_len: List[int] = []
         self.ep_layout: List[str] = []
+        self.ep_source: List[str] = []
 
-    def add_episode(self, frames: dict, layout_desc: str) -> None:
+    def add_episode(self, frames: dict, layout_desc: str,
+                    source: str = "scripted") -> None:
         n = len(frames["image"])
         if n == 0:
             return
@@ -58,6 +61,7 @@ class ShardWriter:
             self.buf[k].append(np.asarray(frames[k]))
         self.ep_len.append(n)
         self.ep_layout.append(layout_desc)
+        self.ep_source.append(source)
         if len(self.ep_len) >= self.episodes_per_shard:
             self.flush()
 
@@ -71,6 +75,7 @@ class ShardWriter:
             path,
             ep_start=ep_start, ep_len=ep_len,
             ep_layout=np.asarray(self.ep_layout, dtype="<U64"),
+            ep_source=np.asarray(self.ep_source, dtype="<U16"),
             **{k: np.concatenate(v, axis=0) for k, v in self.buf.items()})
         self.shard_idx += 1
         self._reset()
@@ -176,6 +181,7 @@ def summarize(root) -> dict:
     shards = sorted(root.glob("*.npz"))
     total_frames = total_eps = 0
     layouts, bad = [], []
+    by_source: dict = {}
     for path in shards:
         with np.load(path) as z:
             n = len(z["image"])
@@ -188,5 +194,11 @@ def summarize(root) -> dict:
             total_frames += n
             total_eps += len(ep_len)
             layouts.extend(z["ep_layout"].tolist())
+            # Pre-merge shards predate ep_source; treat them as scripted.
+            src = (z["ep_source"].tolist() if "ep_source" in z.files
+                   else ["scripted"] * len(ep_len))
+            for s_, ln in zip(src, ep_len):
+                by_source[s_] = by_source.get(s_, 0) + int(ln)
     return {"shards": len(shards), "frames": total_frames, "episodes": total_eps,
-            "unique_layouts": len(set(layouts)), "problems": bad}
+            "unique_layouts": len(set(layouts)), "frames_by_source": by_source,
+            "problems": bad}

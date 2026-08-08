@@ -129,27 +129,47 @@ class CascadedPilot:
         return action
 
 
-def run_episode(env, pilot, rng, noise_std: float, max_steps: int):
-    frames = {k: [] for k in ("image", "image_gt", "seg", "depth_m",
-                              "proprio", "action", "gate_flags")}
+FRAME_KEYS = ("image", "image_gt", "seg", "depth_m", "proprio", "action",
+              "gate_flags")
+
+
+def new_frames() -> dict:
+    """Empty per-episode buffer. Shared with mavrl.teleop so the two collectors
+    cannot drift into writing different columns."""
+    return {k: [] for k in FRAME_KEYS}
+
+
+def record_frame(frames: dict, obs: dict, action, env) -> None:
+    frames["image"].append(obs["image"])
+    frames["image_gt"].append(obs["image_gt"])
+    frames["seg"].append(obs["seg"])
+    frames["depth_m"].append(obs["depth_m"].astype(np.float16))
+    frames["proprio"].append(obs["proprio"])
+    frames["action"].append(np.asarray(action, dtype=np.float32))
+    frames["gate_flags"].append(np.uint8(env.gates_cleared))
+
+
+def stack_frames(frames: dict) -> dict:
+    return {k: np.asarray(v) for k, v in frames.items()}
+
+
+def run_episode(env, pilot, rng, noise_std: float, max_steps: int,
+                on_step=None):
+    frames = new_frames()
     obs, info = env.reset()
     for _ in range(max_steps):
         clean = pilot(env)
-        frames["image"].append(obs["image"])
-        frames["image_gt"].append(obs["image_gt"])
-        frames["seg"].append(obs["seg"])
-        frames["depth_m"].append(obs["depth_m"].astype(np.float16))
-        frames["proprio"].append(obs["proprio"])
-        frames["action"].append(clean)
-        frames["gate_flags"].append(np.uint8(env.gates_cleared))
+        record_frame(frames, obs, clean, env)
 
         # DAgger-style: execute a perturbed action, record the clean label, so
         # the dataset covers states a slightly-wrong policy would reach.
         noisy = np.clip(clean + rng.normal(0.0, noise_std, 4), -1.0, 1.0)
         obs, _, term, trunc, info = env.step(noisy.astype(np.float32))
+        if on_step is not None and on_step(env, obs, info) is False:
+            break
         if term or trunc:
             break
-    return {k: np.asarray(v) for k, v in frames.items()}, info
+    return stack_frames(frames), info
 
 
 def main(argv=None) -> int:
@@ -167,6 +187,12 @@ def main(argv=None) -> int:
                    help="bar-height split; 'all' lets the encoder see held-out "
                         "heights the policy never trains on")
     p.add_argument("--max-stations", type=int, default=max(STAGE_STATIONS))
+    p.add_argument("--gui", action="store_true",
+                   help="watch it fly: 3-D viewer + live RGB/depth/seg feed. "
+                        "Slower, and it needs a display -- use MUJOCO_GL=glfw.")
+    p.add_argument("--prefix", default="shard",
+                   help="shard filename prefix; keep distinct per source so "
+                        "merged directories stay traceable")
     args = p.parse_args(argv)
 
     rng = np.random.default_rng(args.seed)
@@ -177,28 +203,49 @@ def main(argv=None) -> int:
     env = CourseAviary(layout=layout, seed=args.seed, noise=noise,
                        collect_mode=True)
     pilot = CascadedPilot()
-    writer = ShardWriter(args.out, args.episodes_per_shard)
+    writer = ShardWriter(args.out, args.episodes_per_shard, prefix=args.prefix)
+
+    viewer = feed = on_step = None
+    if args.gui:
+        from mavrl.gui import FeedWindow, ViewerWindow, hud_lines
+        viewer, feed = ViewerWindow(env), FeedWindow("mavrl -- scripted pilot")
+
+        def on_step(env, obs, info):
+            feed.poll()
+            feed.draw(obs, hud_lines(env, "scripted pilot (read-only)"))
+            feed.tick()
+            viewer.sync(env)
+            return feed.alive and viewer.running
 
     kept = completed = 0
     for ep in range(args.episodes):
         n_stations = int(rng.integers(0, args.max_stations + 1))
         layout = sample_layout(rng, n_stations, args.split)
         env.set_layout(layout)
+        if viewer is not None:
+            viewer.attach(env)          # set_layout built a new MjModel
 
         max_steps = int(C.t_max(n_stations) * C.POLICY_FREQ) + 5
-        frames, info = run_episode(env, pilot, rng, args.noise, max_steps)
+        frames, info = run_episode(env, pilot, rng, args.noise, max_steps,
+                                   on_step=on_step)
         if len(frames["image"]) == 0:
             continue
 
-        writer.add_episode(frames, layout.describe())
+        writer.add_episode(frames, layout.describe(), source="scripted")
         kept += 1
         completed += int(info.get("is_success", False))
-        if (ep + 1) % 50 == 0:
+        if (ep + 1) % 50 == 0 or args.gui:
             print(f"[{ep + 1}/{args.episodes}] kept={kept} "
                   f"completed={completed} ({completed / max(1, kept):.0%}) "
                   f"last={layout.describe()}", flush=True)
+        if args.gui and not (feed.alive and viewer.running):
+            print("window closed -- stopping and saving")
+            break
 
     writer.close()
+    if viewer is not None:
+        viewer.close()
+        feed.close()
     env.close()
 
     report = summarize(args.out)

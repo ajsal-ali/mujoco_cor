@@ -67,6 +67,7 @@ Seven stages, in order. Stages 1–5 mirror the paper's own recipe; 6–7 are th
 ```
 1  train_course --stage 0 --frozen-encoder   PPO with a random frozen encoder (smoke test)
 2  collect                                   scripted pilot -> sharded dataset
+2b teleop / merge_data (optional)            fly it yourself, then combine
 3  train_sevae                               per-frame VAE, encoder frozen after this
 4  train_memory                              memory backbone, frozen encoder + decoder
 5  bc                                        sequence-aware behaviour cloning
@@ -100,6 +101,73 @@ python -m mavrl.train_course --curriculum --init ckpt/bc_init.pt \
 # 7. evaluation, including the held-out bar heights
 python -m mavrl.evaluate --model runs/course/final.pt --memory-type lstm
 ```
+
+### Step 2 has two collectors
+
+```bash
+# scripted pilot -- headless, thousands of episodes, unattended
+python -m mavrl.collect --episodes 2000 --out data --split all
+
+# ...the same thing with windows open, so you can watch it
+python -m mavrl.collect --episodes 20 --out data --gui
+
+# you fly it yourself
+python -m mavrl.teleop --episodes 30 --out data_manual
+
+# combine them into one trainable directory
+python -m mavrl.merge_data --out data_all data data_manual
+```
+
+Every stage after step 2 points at `data_all` instead of `data`.
+
+**Manual controls** (feed window must be focused):
+
+| key | |
+|---|---|
+| `W` / `S` | forward / back (body +x / −x) |
+| `A` / `D` | left / right |
+| `SPACE` / `L-SHIFT` | up / down |
+| `Q` / `E` | yaw — only with `--free-yaw` |
+| `[` / `]` | speed scale down / up |
+| `ENTER` | end episode, **keep** it |
+| `BACKSPACE` | end episode, **discard** it |
+| `P` | pause |
+| `ESC` | quit, saving everything so far |
+
+Hold-to-fly: while a key is held that axis commands `±V_MAX × scale`, and the
+instant it is released that axis's target goes to **zero** — a velocity command, so
+the drone brakes to a stop rather than drifting. Axes are independent: releasing
+`SPACE` while still holding `W` zeroes the climb and keeps the forward speed.
+
+Two windows open for both `--gui` and `teleop`: a third-person MuJoCo viewer, and a
+feed window showing RGB / depth / segmentation at the 128 px the encoder actually
+receives — not the 512 px raster. `--no-seg` drops the third panel.
+
+Both need a display, so on your machine: `MUJOCO_GL=glfw`. `pip install pygame` (or
+`pip install -e ".[mavrl-gui]"`); headless collection never imports it.
+
+**The recorded label is an acceleration either way.** The env's action space is body
+acceleration + yaw rate, so teleop converts your velocity target the same way the
+scripted pilot does — `a = (v_target − v_cmd)/dt`. If it recorded raw velocities the
+`action` column would mean different things in different rows and the two datasets
+could not be mixed.
+
+Yaw is **locked** to the corridor heading by default so manual data matches the
+scripted set. `--free-yaw` hands `Q`/`E` to you, which is better for the SeVAE
+(stranger viewpoints) and worse for BC (inconsistent with the rest).
+
+One honest caveat, and it's the one `rl/pilot_record.py` already documents: hold-to-fly
+demos are not a clean function of the camera image — the action stays constant while a
+key is held, regardless of what comes into view — so BC on human data tends to regress
+toward the mean. For the **SeVAE** the opposite is true; human flying visits states no
+scripted controller reaches, which is exactly what the encoder wants. Every episode
+carries `ep_source` (`"scripted"` / `"manual"`) so you can filter by it later.
+
+`merge_data` guards the two things that actually break a hand-merge: filename
+collisions between sources (shards are renamed `<source-dir>__<original>`), and
+mismatched columns — a shard from a different `IMG_RES` or an older format loads fine
+alone and explodes mid-epoch. It refuses rather than mixing; `--force` skips the bad
+shard instead. `--link` hard-links rather than copying.
 
 `--split all` in step 2 is deliberate: the *encoder* is allowed to have seen a bar height the
 *policy* never trains on. Training uses red {1.20, 1.98} and blue {0.40, 1.20}; red 1.60 and

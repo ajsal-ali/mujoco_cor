@@ -82,6 +82,9 @@ buys total independence: breaking `mavrl/` cannot break a task that already trai
 | `mavrl/curriculum.py` | `CourseSampler`, synchronized `broadcast_layout` |
 | `mavrl/dataset.py` | `ShardWriter`, `SequenceDataset`, `FrameDataset`, `summarize` |
 | `mavrl/collect.py` | `CascadedPilot` + collection loop |
+| `mavrl/teleop.py` | Manual keyboard collection: hold-to-fly velocity commands, recorded as accelerations |
+| `mavrl/gui.py` | `ViewerWindow` (3-D, re-attaches after `set_layout`) + `FeedWindow` (pygame RGB/depth/seg + held-key state) |
+| `mavrl/merge_data.py` | Combines shard directories; guards filename collisions and mismatched columns |
 | `mavrl/visualize.py` | Sample-image dumps for the SeVAE and the memory aux head; matplotlib imported lazily on Agg |
 | `mavrl/bc.py`, `train_sevae.py`, `train_memory.py`, `train_course.py`, `ald.py`, `evaluate.py` | Training stages |
 | `tests/test_mavrl_geometry.py` | 22 tests, no simulator required |
@@ -117,6 +120,14 @@ Each of these came out of a measurement, not a preference.
 - **Depth is clipped to `DEPTH_MAX`** in `build_observation`; MuJoCo returns the far-clip
   distance (~1130 m) for sky pixels, which is both out of the declared observation space and
   wasteful in float16 storage.
+- **`ep_source` added to the shard format.** Two collectors now write into the dataset
+  (scripted and manual), and once merged there is otherwise no way to tell which frames came
+  from where — which matters, because human demos are good for the SeVAE and questionable for
+  BC. `summarize` reports the frame mix.
+- **pygame rather than OpenCV + a keyboard library.** `key.get_pressed()` is a state poll, so
+  "hold to move, release to stop" is exact; a press-event callback (MuJoCo's viewer
+  `key_callback`, `cv2.waitKey`) has no release event and would have to reconstruct hold from
+  OS key repeat, complete with its ~500 ms initial delay.
 - **An epoch that runs zero batches now raises.** `iter_batches` skips any shard holding
   fewer than `batch_size` windows, so `--seq-len` above the episode length (or an oversized
   batch) produced a full training run reporting `past=0.00000` and saving an untrained

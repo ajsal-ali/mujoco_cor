@@ -30,6 +30,11 @@ mavrl = [
     "imageio-ffmpeg>=0.4.9",
     "tqdm>=4.65.0",
 ]
+# GUI extras: only mavrl.teleop and `collect --gui` need these, and both need a
+# display. Headless training on Modal must not pull them in.
+mavrl-gui = [
+    "pygame>=2.5.0",
+]
 all = [
     "stable-baselines3>=2.0.0",
     "pettingzoo>=1.24.0",
