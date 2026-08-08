@@ -20,6 +20,16 @@ rl = ["stable-baselines3>=2.0.0"]
 marl = ["pettingzoo>=1.24.0"]
 viz = ["matplotlib>=3.5.0"]
 gpu = ["jax[cuda12]", "mujoco-mjx>=3.0.0"]
+# mavrl needs torch declared explicitly -- it arrived transitively via
+# stable-baselines3 before, which meant nothing pinned it.
+mavrl = [
+    "torch>=2.0.0",
+    "stable-baselines3>=2.0.0",
+    "matplotlib>=3.5.0",
+    "imageio>=2.31.0",
+    "imageio-ffmpeg>=0.4.9",
+    "tqdm>=4.65.0",
+]
 all = [
     "stable-baselines3>=2.0.0",
     "pettingzoo>=1.24.0",
@@ -33,7 +43,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["multi_drone_mujoco*"]
+include = ["multi_drone_mujoco*", "mavrl*"]
 
 [tool.pytest.ini_options]
-testpaths = ["multi_drone_mujoco/tests"]
+testpaths = ["multi_drone_mujoco/tests", "tests"]
