@@ -37,25 +37,82 @@ fixed-speed baseline and Pareto sweep are deliberately out of scope.
 
 ## Course geometry
 
-Corridor `x∈[-2,2]`, `z∈[0,5]`, stations spaced **ΔY = 4.0 m** along +y.
+**The arena is the real IMAV2026 course**, `Files(3)/imav2026_scaled.sdf`, converted by
+`imav_teleop.SdfToMjcf` and injected exactly as `imav_play.make_world_injector` does. Nothing
+is invented and nothing is moved.
 
-- **Station 0** — the existing wall at `y=3.30`, unchanged. Must pass the **red** opening;
-  crossing the blue opening is a `wrong_gate` failure.
-- **Intermediate stations** (0–3 of them, at `y = 3.30 + k·4.0`) — one horizontal bar each,
-  spanning the full corridor width, `hy=0.05`, `hz=0.04`, collidable:
-  - `RED_BAR` — centre height ∈ {1.20, 1.60, 1.98} m, must pass **above**
-  - `BLUE_BAR` — centre height ∈ {0.40, 0.80, 1.20} m, must pass **below**
-  Free space exists on both sides; colour alone says which side is legal. Wrong side =
-  `wrong_side` failure (terminate), hitting the bar = `collision` crash.
-- **Exit window** — a second wall at `y = 3.30 + (N+1)·4.0`, single centred opening.
-- **Lateral containment** — no new geometry. `_computeReward`'s out-of-bounds check tightens
-  to `|x| > 2.0` once past station 0, so flying around a bar terminates the episode.
-- **Spawn standoff** — `SPAWN_STANDOFF = 2.0 m` in front of station 0's plane, jittered to
-  stay within `[1.7, 2.3] m`, rather than `SpawnConfig.BASE`'s hardcoded `y = 0.4`
-  (`window_aviary.py:84`). Defined relative to the first station so it survives the course
-  being repositioned. At 2 m with a 60° FOV the camera covers a 2.3 × 2.3 m patch — the full
-  0.88 m opening plus surrounding wall for context, so the drone can see what it is aiming at
-  from the first frame rather than starting with its nose in the wall.
+### Units — SDF, not competition metres
+
+The SDF is the competition arena scaled by **2.2x**. Three independent numbers agree:
+
+| SDF | ÷ 2.2 | competition spec |
+|---|---|---|
+| `red_bar` z = 4.356 | 1.98 | 1980 mm |
+| `blue_bar` z = 0.880 | 0.40 | 400 mm |
+| station spacing 2.20 | 1.00 | 1 m |
+
+Every constant in `mavrl/` is in **SDF units**. Competition millimetres appear only in
+comments beside the height tables. This is not pedantry — see "What implementation changed".
+
+### Layout, in the direction of travel (**+y**)
+
+| y | model(s) | varies? |
+|---|---|---|
+| −14.30 | spawn — the `takeoff_platform` plane | fixed |
+| **−12.10** | `exit_wall_*` — the wall the drone **enters** through. Red opening `x∈[0.440,1.320]`, `z∈[2.970,3.850]`; blue decoy `x∈[−1.320,0]`, `z∈[2.860,3.960]` | fixed |
+| −9.90 / −7.70 / −5.50 | **bar stations** (the SDF's red_bar / blue_bar1 / blue_bar2 slots, slot 0 first) | **count, colour, height** |
+| −2.20 | `tube_B_*` — posts at x=±1.10, a horizontal at z=1.014, a diagonal from (+1.10, 2.03) to (−1.10, 4.23) | fixed |
+| 0.00 | `tube_A_post` — vertical cylinder at x=0 | fixed |
+| **+3.30** | `obs_wall_*` — the **exit**, geometrically identical to the entry | fixed |
+
+The SDF's model names run opposite to the flight direction: what it calls `exit_wall_*` is
+entered first, because `takeoff_platform` sits at y = −14.30 beyond it. The walls are
+identical, so the course is symmetric and the direction is convention — but it is the
+competition's, and it puts the bars *before* the tubes.
+
+`course_gates.TRAVEL_SIGN` is the sole source of truth. Crossings, progress, AGV, spawn side,
+the pilot's approach points and every test derive from it; nothing hardcodes a y comparison.
+
+Also fixed: three ground boxes, `turbine_assembly`, `ring_board_assembly`, `strip_*`,
+`arena_floor`, the four platforms, and the side room at x≈−4.95, y≈12.65. The room is **not**
+a ceiling over the corridor — the corridor is open above, which is what makes "pass above a
+red bar at 4.356" possible at all.
+
+### What varies, and only this
+
+The shipped `red_bar` / `blue_bar1` / `blue_bar2` and their posts and feet are skipped during
+conversion (`SDF_BAR_MODELS`) and re-emitted per layout by `station_xml`, at the SDF's own
+station planes with the SDF's own tube radii, post heights and colours:
+
+- **count** — 0 to 3 stations, filling the slots nearest the entry first
+- **colour order** — red or blue at each slot, independently
+- **height** — red ∈ {2.640, 3.520, 4.356}, blue ∈ {0.880, 1.760, 2.640}
+
+Red = pass **above**, blue = pass **below**. Free space exists on both sides of every bar and
+the bar spans past its posts (`RED_BAR_LENGTH/2 = 2.2 > POST_X = 1.65`), so colour alone says
+which side is legal. Wrong side = `wrong_side`; hitting the bar = `collision`.
+
+Post height stays the SDF's per colour (red 4.51, blue 2.64) and does **not** follow the bar —
+the shipped blue station already carries an 0.88 bar on a 2.64 post.
+
+### Consequences worth stating
+
+- **Stations are 2.20 apart.** A blue bar at 0.880 followed by a red at 4.356 is a 3.5-unit
+  swing inside one spacing — not flyable at full forward speed. That is the point: the policy
+  has to slow down, which is MAVRL's entire thesis. The scripted pilot throttles forward speed
+  by the outstanding vertical error (`CLIMB_SLOWDOWN`), and measured AGV falls from 1.61 with
+  no bars to 0.79 on a red/blue/red whipsaw.
+- **Lateral containment** is a reward-side test (`|x| > 2.6` past the entry wall), not new
+  geometry, so the obstacle set stays exactly the competition's.
+- **The pilot needs via-points through `tube_B`.** It chains gate waypoints and has no
+  obstacle avoidance, which is fine for gates and not for the tubes now that they sit between
+  the last bar and the exit. `tube_B_post_R` is at x = 1.10 and the exit window's red opening
+  is centred at x = 0.88: the straight run from the last bar passes ~0.12 from the post, inside
+  the pilot's own lateral overshoot, and collided on every 2- and 3-bar layout. `TUBE_VIAS`
+  threads x = 0.35 there. The policy gets no such hint — it can see the tubes.
+- **Spawn** is `SPAWN_STANDOFF = 2.20` in front of the entry wall (one station spacing),
+  jittered ±0.35, centred on the **red** opening and facing −y, so the target rather than the
+  decoy is what the camera sees first.
 
 ## Files
 
@@ -70,7 +127,7 @@ buys total independence: breaking `mavrl/` cannot break a task that already trai
 |---|---|
 | `mavrl/config.py` | Every shared constant: resolutions, rates, action limits, reward weights, network widths, curriculum thresholds |
 | `mavrl/course_gates.py` | `Opening`, `WallGate` (target + decoy), `BarGate` (above/below), `GateSequence`, `Outcome`. No mujoco, no torch |
-| `mavrl/course_world.py` | `StationSpec`/`CourseLayout`, curriculum sampling with held-out heights, `SemClass` + `classify_geom_name`, named-geom XML, injector, `build_geom_class_lut` |
+| `mavrl/course_world.py` | The real IMAV SDF arena + per-layout bar stations; `StationSpec`/`CourseLayout`, curriculum sampling with held-out heights, `SemClass` + `classify_body_name`, `build_geom_class_lut`, injector |
 | `mavrl/imageproc.py` | 512→128 downsamplers (area RGB / min-pool depth / nearest seg), depth packing, proximity weight |
 | `mavrl/sensor_noise.py` | Depth + RGB noise, encoder input only |
 | `mavrl/course_aviary.py` | The env: 10 Hz policy over 60 Hz PID over 240 Hz sim, acceleration actions, per-gate reward, `set_layout` |
@@ -128,6 +185,29 @@ Each of these came out of a measurement, not a preference.
   "hold to move, release to stop" is exact; a press-event callback (MuJoCo's viewer
   `key_callback`, `cv2.waitKey`) has no release event and would have to reconstruct hold from
   OS key repeat, complete with its ~500 ms initial delay.
+- **The arena was rebuilt on the real SDF, and it exposed a scale bug.** The first version of
+  `course_world.py` was procedural: it took the entry-window constants from `rl/window_aviary.py`
+  (correct, SDF-scale, z ~ 3.4) and the bar heights from the user's spec-sheet millimetres
+  (1x scale, z = 0.4..1.98) and put both in one coordinate frame. Every window exit became a
+  3 m dive. That was reported at the time as a geometry finding — "the vertical profile does
+  not fit in 2.5 m" — and "fixed" by widening `STATION_SPACING` to 4.0. It was a unit error
+  wearing a geometry costume. The real spacing is 2.20.
+  Three more things had been invented rather than derived: the course ran **+y** (the arena
+  runs −y), bars were boxes rather than cylinders on posts, and the exit window
+  (`x ±0.44, z 1.06..1.94`) bore no relation to the real exit wall, which is the entry wall
+  duplicated.
+- **`Files(3)/`, `imav_play.py`, `imav_teleop.py` were restored from git** (`1241352`, 41 files,
+  20 MB). An earlier note claimed the assets were not in git at all; they are.
+- **`GateSequence.waypoint`'s default standoff was 0.5, overriding the gates' own 0.0.** In the
+  old +y world that silently put the progress-reward target half a metre *past* every plane —
+  exactly what `WallGate.waypoint`'s docstring says not to do. Flipping to −y turned it into a
+  visible failure: the target became half a metre *short*, and pursuit converged in front of
+  the entry wall and stopped. Default is now 0.0 and a test pins the two together.
+- **Semantics are classified by body name, not geom name.** `SdfToMjcf` emits anonymous
+  `g1, g2, ...` geoms and puts the meaningful name on the enclosing body, so the LUT resolves
+  through `model.geom_bodyid`. One rule covers the converted arena and the generated bars. A
+  `SemClass.OBSTACLE` was added for the tubes, boxes, turbine and ring board — things that are
+  neither wall nor bar and that the procedural course simply did not have.
 - **An epoch that runs zero batches now raises.** `iter_batches` skips any shard holding
   fewer than `batch_size` windows, so `--seq-len` above the episode length (or an oversized
   batch) produced a full training run reporting `past=0.00000` and saving an untrained

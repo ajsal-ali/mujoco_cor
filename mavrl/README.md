@@ -1,11 +1,58 @@
 # `mavrl/` — memory-augmented vision-only flight through a bar course
 
 A MAVRL-style pipeline (Yu et al., *MAVRL: Learn to Fly in Cluttered Environments With
-Varying Speed*, IEEE RA-L, Feb 2025) for a task the paper does not have: a corridor with a
-**red entry window** (a blue window beside it is a decoy), **0–3 horizontal bars** — red means
-*fly above*, blue means *fly below* — and an **exit window**. The policy sees RGB-D and its own
-body state. It gets no goal pose, no bearing, and no privileged geometry: the colour of the
-bar in front of it is the only thing that says which way to go.
+Varying Speed*, IEEE RA-L, Feb 2025) flown in the **real IMAV2026 arena** —
+`Files(3)/imav2026_scaled.sdf`, converted to MJCF by `imav_teleop.SdfToMjcf` and injected the
+way `imav_play.make_world_injector` does it. Nothing about the arena is invented.
+
+The task: through the **red entry window** (a blue window beside it is a decoy), past the
+fixed obstacles, through **0–3 horizontal bars** — red means *fly above*, blue means *fly
+below* — and out through the **exit window**. The policy sees RGB-D and its own body state. It
+gets no goal pose, no bearing, and no privileged geometry: the colour of the bar in front of
+it is the only thing that says which way to go.
+
+## The arena
+
+Travel is along **+y**, starting from the arena's own `takeoff_platform` plane. Only the bar
+stations vary between episodes.
+
+| y | what | varies? |
+|---|---|---|
+| −14.30 | spawn — the `takeoff_platform` plane, one station spacing back | fixed |
+| **−12.10** | entry wall — red opening (x 0.44–1.32, z 2.97–3.85) + blue decoy | fixed |
+| −9.90 / −7.70 / −5.50 | **bar stations** (slot 0 first) | **count, colour, height** |
+| −2.20 | `tube_B` — posts at x=±1.10, a horizontal at z=1.01, a diagonal | fixed |
+| 0.00 | `tube_A` — vertical post at x=0 | fixed |
+| **+3.30** | exit wall — identical to the entry wall | fixed |
+
+Plus three ground boxes, a turbine, a ring board and four platforms, all fixed.
+
+The SDF's model names run the other way — what it calls `exit_wall_*` is the wall you enter
+through, because the takeoff platform sits beyond it. The two walls are geometrically
+identical, so the course is symmetric and direction is pure convention; this is the
+competition's convention, and it puts the bars *before* the tubes.
+
+`course_gates.TRAVEL_SIGN` is the single source of truth for that direction. Crossings,
+progress, AGV, spawn side, the pilot's approach points and the tests all derive from it —
+nothing hardcodes a y comparison, so flipping the course is a one-line change.
+
+**`tube_B` is the reason the scripted pilot has via-points.** Its right post sits at x = 1.10
+and the exit window's red opening is centred at x = 0.88 — a straight run from the last bar
+(x = 0) to that window passes about 0.12 from the post, inside the pilot's own lateral
+overshoot, and collides. The pilot threads x = 0.35 at `tube_B` and closes the lateral gap
+afterwards. The *policy* gets no such hint; it can see the tubes.
+
+### Units: the arena is the competition course × 2.2
+
+The filename says "scaled" and the numbers agree exactly — `red_bar` at z = 4.356 is
+2.2 × 1980 mm, `blue_bar` at 0.880 is 2.2 × 400 mm, stations 2.20 apart is 2.2 × 1 m.
+**Every constant in this package is in SDF units**; competition millimetres appear only in
+comments. Bar heights are therefore red {2.640, 3.520, 4.356} and blue {0.880, 1.760, 2.640}.
+
+Mixing the two frames is the one mistake this codebase is built to prevent, because it
+already happened: the window constants came from the SDF and the bar heights from the spec
+sheet, which put a 3 m dive out of every window and got mis-diagnosed as a spacing problem.
+`test_scale_relates_sdf_units_to_competition_millimetres` pins it.
 
 `MAVRL_PLAN.md` at the repo root is the design document — why each number is what it is. This
 file is how to run it.
@@ -19,7 +66,7 @@ file is how to run it.
 | Encoder input | depth only | **RGB-D** — the task is colour-conditioned, so depth alone is unsolvable |
 | VAE loss | plain MSE | **proximity-weighted** MSE + a **segmentation head** (SeVAE) |
 | Memory | LSTM | LSTM **or** windowed attention with RMT memory tokens, behind `--memory-type` |
-| Simulator | AvoidBench + SGM stereo | MuJoCo, with a synthetic depth/RGB noise model in its place |
+| Simulator | AvoidBench + SGM stereo | MuJoCo on the IMAV2026 arena, with a synthetic depth/RGB noise model in place of SGM stereo |
 | Baselines | fixed-speed comparison, Pareto sweep | dropped — the goal is a working policy |
 
 Everything else — 64-d latent, 256-d memory, the six-conv encoder, `concat(z_t, x_t)` at both
@@ -170,8 +217,8 @@ alone and explodes mid-epoch. It refuses rather than mixing; `--force` skips the
 shard instead. `--link` hard-links rather than copying.
 
 `--split all` in step 2 is deliberate: the *encoder* is allowed to have seen a bar height the
-*policy* never trains on. Training uses red {1.20, 1.98} and blue {0.40, 1.20}; red 1.60 and
-blue 0.80 are held out, and step 7 reports the gap. A large gap means four heights were
+*policy* never trains on. Training uses red {2.640, 4.356} and blue {0.880, 2.640}; red 3.520
+and blue 1.760 are held out, and step 7 reports the gap. A large gap means four heights were
 memorized rather than the rule "red → above".
 
 ## Stage 4 in detail — the memory ablation
@@ -251,10 +298,15 @@ smear for `past` means the backbone is describing, not remembering.
 | Observation | `image (128,128,4) uint8` + `proprio (16,)` |
 | Proprio | `[grav_body(3), gyro(3), vel_body(3), v_cmd_body(3), prev_action(4)]` — **no goal terms** |
 | Render | 512², downsampled to 128 (area-mean RGB, **min-pool** depth, nearest seg) |
-| Depth | clipped to 12 m |
+| Depth | clipped to 16 (SDF units) — keeps the next two stations in the sensor |
+| Semantics | 8 classes: free, wall, red/blue window, red/blue bar, floor, **obstacle** (tubes, boxes, turbine, ring board) |
 
-Min-pool for depth, not area-mean: a bar 5 px wide at 2 m and ~1 px at 8 m is averaged out of
-existence by a mean filter. `tests/test_mavrl_geometry.py` pins that.
+Min-pool for depth, not area-mean: a thin bar covers a couple of pixels at range and a mean
+filter averages it out of existence. `tests/test_mavrl_geometry.py` pins that.
+
+Segmentation is classified by **body** name, not geom name: `SdfToMjcf` emits `g1, g2, ...`
+for geoms and puts the meaningful name on the enclosing body, so the LUT goes through
+`model.geom_bodyid`. That one rule covers both the converted arena and the generated bars.
 
 `collect_mode=True` adds `image_gt`, `seg` and `depth_m` from the **clean** render, so the
 dataset trains reconstruction against ground truth while the encoder sees noise — a denoising
@@ -266,10 +318,17 @@ All parallel envs share one layout at a time; the curriculum broadcasts a new on
 **rollout boundary** via `venv.env_method("set_layout", …)`. Switching mid-rollout would
 invalidate value estimates already collected against the old geometry.
 
-Stations are 4.0 m apart (constant), red bars at 1.20 / 1.60 / 1.98 m, blue at 0.40 / 0.80 /
-1.20 m, spawn ~2 m before the entry window so the drone can see it. Advancement is on a rolling
-200-episode success rate above 80 %, with a forced advance after 400 rollouts so a stalled
-stage cannot deadlock the run.
+Stations sit on the SDF's own planes, in travel order (y = −9.90 / −7.70 / −5.50, 2.20 apart); red bars at
+2.640 / 3.520 / 4.356, blue at 0.880 / 1.760 / 2.640; spawn 2.20 before the entry wall,
+centred on the red opening so the target is the first thing the camera sees. Advancement is on
+a rolling 200-episode success rate above 80 %, with a forced advance after 400 rollouts so a
+stalled stage cannot deadlock the run.
+
+**Consecutive stations are only 2.20 apart**, so a blue bar at 0.880 followed by a red at
+4.356 is a 3.5-unit swing inside one spacing. That is not flyable at full forward speed —
+which is the point. The scripted pilot throttles its forward speed by the vertical error still
+outstanding, and measured AGV falls from 1.61 (no bars) to 0.79 on a red/blue/red whipsaw.
+That spread is the varying-speed signal the policy is meant to reproduce.
 
 ## Tests
 

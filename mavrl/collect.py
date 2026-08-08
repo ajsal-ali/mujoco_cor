@@ -24,23 +24,29 @@ import math
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
-os.environ.setdefault("MUJOCO_GL", "egl")
+# os.environ.setdefault("MUJOCO_GL", "egl")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mavrl import config as C                                    # noqa: E402
 from mavrl.course_aviary import CourseAviary                     # noqa: E402
-from mavrl.course_gates import BarGate, BarSide, WallGate        # noqa: E402
+from mavrl.course_gates import (                                 # noqa: E402
+    TRAVEL_SIGN, BarGate, BarSide, WallGate,
+)
 from mavrl.course_world import (                                 # noqa: E402
-    STAGE_STATIONS, sample_layout,
+    RED_Z_HI, RED_Z_LO, STAGE_STATIONS, TUBE_VIAS, YAW_DOWN_COURSE,
+    sample_layout,
 )
 from mavrl.dataset import ShardWriter, summarize                 # noqa: E402
 from mavrl.sensor_noise import NoiseConfig                       # noqa: E402
 
 
-APPROACH_DIST = 0.8      # metres before a gate plane to hit the legal altitude
+#: Distance before a gate plane at which the legal altitude must already be
+#: held. One third of a station spacing.
+APPROACH_DIST = 0.75
 
 
 def gate_targets(gate) -> list:
@@ -52,7 +58,8 @@ def gate_targets(gate) -> list:
     wrong-side failure the dense reward's waypoint placement also guards against.
     """
     c = gate.center
-    return [np.array([c[0], gate.y - APPROACH_DIST, c[2]]), c.copy()]
+    return [np.array([c[0], gate.y - TRAVEL_SIGN * APPROACH_DIST, c[2]]),
+            c.copy()]
 
 
 class CascadedPilot:
@@ -72,18 +79,27 @@ class CascadedPilot:
 
     #: Per-axis braking conservatism (world x, y, z). Z is tightest because a
     #: descent has to be arrested by thrust exceeding weight, so the achievable
-    #: deceleration is well below A_MAX -- and the blue@0.40 gate leaves only
-    #: ~0.3 m between the bar's underside and the ground cutoff.
-    BRAKE_SAFETY = (0.5, 0.5, 0.30)
+    #: deceleration is well below A_MAX.
+    BRAKE_SAFETY = (0.5, 0.5, 0.35)
+
+    #: Forward speed is throttled by the vertical error still outstanding.
+    #: Stations are 2.20 apart and a blue@0.880 followed by a red@4.356 is a
+    #: 3.9-unit climb inside that spacing -- flat out, the plane arrives before
+    #: the altitude does. This is the scripted stand-in for the varying-speed
+    #: behaviour the policy is supposed to learn.
+    CLIMB_SLOWDOWN = 0.55
 
     def __init__(self, kp_pos: float = 1.6, kp_vel: float = 2.5,
-                 kp_yaw: float = 2.0, brake_safety=None):
+                 kp_yaw: float = 2.0, brake_safety=None,
+                 climb_slowdown: Optional[float] = None):
         self.kp_pos = kp_pos
         self.kp_vel = kp_vel
         self.kp_yaw = kp_yaw
         self.brake_safety = np.asarray(
             brake_safety if brake_safety is not None else self.BRAKE_SAFETY,
             dtype=float)
+        self.climb_slowdown = (self.CLIMB_SLOWDOWN if climb_slowdown is None
+                               else climb_slowdown)
 
     def _velocity_target(self, err: np.ndarray) -> np.ndarray:
         a_max = np.array(C.A_MAX)
@@ -91,14 +107,44 @@ class CascadedPilot:
         v_brake = self.brake_safety * np.sqrt(2.0 * a_max * np.abs(err))
         speed = np.minimum(np.abs(self.kp_pos * err),
                            np.minimum(v_max, v_brake))
-        return np.sign(err) * speed
+        v = np.sign(err) * speed
+
+        # Throttle the along-course axis by how much altitude is still owed, so
+        # the drone arrives at the plane already at the legal height instead of
+        # arriving first and correcting after.
+        v_z_needed = min(abs(v[2]), v_max[2])
+        if v_z_needed > 1e-6:
+            scale = 1.0 / (1.0 + self.climb_slowdown * v_z_needed)
+            v[1] *= scale
+        return v
 
     def target(self, env) -> np.ndarray:
+        """Approach point until the drone is past it, then the gate centre --
+        unless a fixed tube obstacle stands between here and that target, in
+        which case thread the tube first.
+
+        The pilot has no obstacle avoidance; it chains gate waypoints. That is
+        fine for gates but not for `tube_B`, which sits between the last bar and
+        the exit window with a post 0.22 from the window's centreline.
+        """
         gate = env.gates.current
         if gate is None:
-            return np.array([0.0, env.layout.exit_y + 2.0, 1.5])
+            # Course cleared: keep going straight out past the exit wall.
+            return np.array([0.0, env.layout.exit_y + TRAVEL_SIGN * 2.0,
+                             0.5 * (RED_Z_LO + RED_Z_HI)])
         approach, centre = gate_targets(gate)
-        return approach if env.pos[0][1] < approach[1] else centre
+        reached = TRAVEL_SIGN * (env.pos[0][1] - approach[1]) >= 0.0
+        tgt = centre if reached else approach
+
+        y = env.pos[0][1]
+        for via_y, via_x in TUBE_VIAS:
+            ahead = TRAVEL_SIGN * (via_y - y) > 0.0
+            before_target = TRAVEL_SIGN * (tgt[1] - via_y) > 0.0
+            if ahead and before_target:
+                # Hold the target altitude through the tube, so the only thing
+                # left to do after it is close the lateral gap to the window.
+                return np.array([via_x, via_y, tgt[2]])
+        return tgt
 
     def __call__(self, env) -> np.ndarray:
         pos = env.pos[0]
@@ -121,8 +167,8 @@ class CascadedPilot:
         # overshoot to x = -1.02 against an opening edge at -0.44.
         a_body = (v_des_body - env.v_cmd_body) / C.POLICY_DT
 
-        yaw_err = math.atan2(math.sin(math.pi / 2 - yaw),
-                             math.cos(math.pi / 2 - yaw))
+        yaw_err = math.atan2(math.sin(YAW_DOWN_COURSE - yaw),
+                             math.cos(YAW_DOWN_COURSE - yaw))
         action = np.empty(4, dtype=np.float32)
         action[:3] = np.clip(a_body / np.array(C.A_MAX), -1.0, 1.0)
         action[3] = np.clip(self.kp_yaw * yaw_err / C.YAW_RATE_MAX, -1.0, 1.0)

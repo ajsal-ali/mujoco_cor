@@ -35,9 +35,9 @@ import mujoco
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mavrl import config as C                                    # noqa: E402
-from mavrl.course_gates import Outcome                           # noqa: E402
+from mavrl.course_gates import TRAVEL_SIGN, Outcome              # noqa: E402
 from mavrl.course_world import (                                 # noqa: E402
-    CourseLayout, ENTRY_Y, N_SEM_CLASSES, build_geom_class_lut,
+    CourseLayout, ENTRY_Y, EXIT_Y, N_SEM_CLASSES, build_geom_class_lut,
     build_gates, make_course_world_injector, spawn_pose,
 )
 from mavrl.imageproc import build_observation, seg_to_classes    # noqa: E402
@@ -66,7 +66,7 @@ class CourseAviary(BaseAviary):
         self._reset_task_state()
 
         pos, yaw = spawn_pose(self._rng)
-        original, patched = make_course_world_injector(self.layout)
+        original, patched = make_course_world_injector(self.layout, C.RENDER_RES)
         _BA._generate_aviary_xml = patched
         try:
             super().__init__(
@@ -110,7 +110,7 @@ class CourseAviary(BaseAviary):
         self.layout = layout
         self.gates = build_gates(layout)
 
-        original, patched = make_course_world_injector(layout)
+        original, patched = make_course_world_injector(layout, C.RENDER_RES)
         _BA._generate_aviary_xml = patched
         try:
             xml = _BA._generate_aviary_xml(
@@ -256,7 +256,7 @@ class CourseAviary(BaseAviary):
             reward += C.K_PROG * (self.d_prev - d)
             self.d_prev = d
 
-            if abs(pos[1] - self.gates.current.y) < C.CENTER_BAND:
+            if abs(pos[1] - self.gates.current.y) < C.CENTER_BAND:  # signless
                 off = math.hypot(pos[0] - self._wp[0], pos[2] - self._wp[2])
                 reward -= C.K_CENTER * off
 
@@ -288,7 +288,7 @@ class CourseAviary(BaseAviary):
                 crash = True
 
         if not self._success and not crash:
-            past_entry = pos[1] > ENTRY_Y
+            past_entry = TRAVEL_SIGN * (pos[1] - ENTRY_Y) > 0.0
             if self._check_collision():
                 crash, reason = True, "collision"
             elif pos[2] < 0.05:
@@ -296,11 +296,14 @@ class CourseAviary(BaseAviary):
             elif abs(rpy[0]) > math.pi / 2 or abs(rpy[1]) > math.pi / 2:
                 crash, reason = True, "flip"
             elif past_entry and abs(pos[0]) > C.CORRIDOR_X_LIMIT:
-                # No side walls: the corridor is enforced here rather than with
-                # geometry, so the obstacle set stays exactly as specified.
+                # The arena has no side walls along the corridor; it is enforced
+                # here rather than with geometry so the obstacle set stays
+                # exactly the competition's.
                 crash, reason = True, "out_of_corridor"
-            elif (abs(pos[0]) > 7.0 or pos[1] < -13.0
-                  or pos[1] > self.layout.exit_y + 5.0 or pos[2] > 6.0):
+            elif (abs(pos[0]) > 7.5 or pos[2] > 7.0
+                  # more than 4 past the exit, or 6 back behind the entry
+                  or TRAVEL_SIGN * (pos[1] - EXIT_Y) > 4.0
+                  or TRAVEL_SIGN * (pos[1] - ENTRY_Y) < -6.0):
                 crash, reason = True, "out_of_bounds"
 
         if crash:
@@ -335,11 +338,13 @@ class CourseAviary(BaseAviary):
         }
 
     def _agv(self) -> float:
-        """Average goal velocity: course length over elapsed time."""
+        """Average goal velocity: distance made good along the course, over
+        elapsed time. Signed by TRAVEL_SIGN so it survives a direction flip."""
         t = self.step_counter / self.SIM_FREQ
         if t <= 0.0:
             return 0.0
-        return float(max(0.0, self.pos[0][1] - self._start_y) / t)
+        made_good = TRAVEL_SIGN * (self.pos[0][1] - self._start_y)
+        return float(max(0.0, made_good) / t)
 
     # -- step: hold one action across CTRL_PER_POLICY inner ticks ------------
 

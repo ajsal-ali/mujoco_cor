@@ -47,15 +47,27 @@ class BarSide(Enum):
     BELOW = auto()
 
 
+#: The IMAV course runs along **+y**: the drone starts at the takeoff platform
+#: (y = -14.30), enters through the wall at y = -12.10, and leaves through the
+#: one at y = +3.30. The two walls are geometrically identical, so the course is
+#: symmetric and this sign is the only thing that says which is the entrance.
+#:
+#: This is the single source of truth for the direction. Every signed test in
+#: mavrl -- crossings, progress, AGV, spawn side, the pilot's approach points --
+#: derives from it rather than hardcoding a comparison, so flipping the course
+#: is a one-line change.
+TRAVEL_SIGN = 1.0
+
+
 def _forward_crossing(prev_pos, cur_pos, plane_y: float) -> Optional[float]:
-    """Interpolation factor for a forward (+y) crossing of `plane_y`, else None.
+    """Interpolation factor for a forward crossing of `plane_y`, else None.
 
     Returns `a` in [0, 1) such that the crossing point is
     `prev_pos + a * (cur_pos - prev_pos)`. Backward crossings do not count -- the
     drone retreating through a gate must not re-trigger it.
     """
-    s0 = prev_pos[1] - plane_y
-    s1 = cur_pos[1] - plane_y
+    s0 = TRAVEL_SIGN * (prev_pos[1] - plane_y)
+    s1 = TRAVEL_SIGN * (cur_pos[1] - plane_y)
     if s0 < 0.0 <= s1 and s1 != s0:
         return -s0 / (s1 - s0)
     return None
@@ -122,11 +134,10 @@ class WallGate:
         return np.array([cx, self.y, cz])
 
 
-#: Never aim below this altitude. The env terminates on z < 0.05, and the
-#: lowest blue bar sits at 0.40 -- a naive `height - clearance` puts the target
-#: at exactly 0.05, i.e. on the kill line. Measured effect: stage-3 pilot runs
-#: ending in `ground` while tracking their waypoint correctly.
-MIN_FLIGHT_Z = 0.25
+#: Never aim below this altitude, in SDF units. The lowest blue bar sits at
+#: 0.880 with radius 0.0396, so its underside is 0.840; a drone aiming much
+#: below that is flying at the floor for no reason.
+MIN_FLIGHT_Z = 0.35
 
 
 @dataclass(frozen=True)
@@ -134,9 +145,12 @@ class BarGate:
     """A horizontal bar spanning the corridor; one side of it is legal."""
 
     y: float
-    height: float            # bar centreline height, metres
+    height: float            # bar centreline height, SDF units
     side: BarSide
-    clearance: float = 0.35  # nominal offset from the bar on the legal side
+    #: Offset from the bar centreline on the legal side. Must clear the bar
+    #: radius (0.044 red, 0.0396 blue) plus the drone's own half-span with room
+    #: to spare; 0.45 is ~0.20 m at competition scale.
+    clearance: float = 0.45
 
     def check(self, prev_pos, cur_pos) -> Outcome:
         a = _forward_crossing(prev_pos, cur_pos, self.y)
@@ -205,14 +219,23 @@ class GateSequence:
             self.index += 1
         return outcome
 
-    def waypoint(self, standoff: float = 0.5) -> Optional[np.ndarray]:
-        """Progress target: the next uncleared gate's waypoint."""
+    def waypoint(self, standoff: float = 0.0) -> Optional[np.ndarray]:
+        """Progress target: the next uncleared gate's waypoint, **in** its plane.
+
+        The default used to be 0.5, silently overriding the gates' own default
+        of 0.0 and putting the progress target half a metre past every plane --
+        exactly what `WallGate.waypoint`'s docstring says not to do. Flipping the
+        course to -y turned that latent bug visible: +0.5 became half a metre
+        *short* of each plane, and pursuit converged to a point in front of the
+        entry wall and stopped.
+        """
         if self.done:
             return None
         return self.current.waypoint(standoff)
 
     def distance_to_plane(self, pos) -> float:
-        """Signed distance to the current gate's plane (for the centering term)."""
+        """Signed distance to the current gate's plane, positive when not yet
+        reached."""
         if self.done:
             return math.inf
-        return float(pos[1] - self.current.y)
+        return float(TRAVEL_SIGN * (self.current.y - pos[1]))

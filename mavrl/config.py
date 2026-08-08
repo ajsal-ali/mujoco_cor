@@ -20,10 +20,11 @@ RENDER_RES = 512
 #: bars away. Rendering at 512 and min-pooling preserves them.
 IMG_RES = 128
 
-#: Depth clip, metres. 12 rather than 8 because the course is ~13 m end to end
-#: and the proximity weight below runs out to 12 -- a shorter clip would make
-#: the far half of the course invisible and the weight tail meaningless.
-DEPTH_MAX = 12.0
+#: Depth clip, in SDF units (the arena is the competition course scaled 2.2x).
+#: The course is 15.4 units from entry wall to exit wall and stations sit 2.20
+#: apart, so 16 keeps the next two stations inside the sensor while still
+#: cutting the far room off. The proximity weight below runs to the same value.
+DEPTH_MAX = 16.0
 
 IMG_CHANNELS = 4        # RGB + depth
 
@@ -33,15 +34,16 @@ IMG_CHANNELS = 4        # RGB + depth
 #   t = clip((d - D_NEAR) / (D_FAR - D_NEAR), 0, 1)
 #   w = W_MIN + (1 - W_MIN) * (1 - t)**2
 #
-# 1.00 at contact, 0.92 @1m, 0.77 @2m, 0.63 @3m, 0.51 @4m, 0.31 @6m,
-# 0.17 @8m, 0.08 @10m, 0.05 floor from 12 m out. Quadratic rather than
-# exponential so the decay stays gradual through the mid-field where the *next*
-# station first becomes visible; exp(-d/2) would already be at 0.05 by 6 m.
+# Distances are SDF units; divide by 2.2 for competition metres. 1.00 at
+# contact, ~0.77 at 2.2 (one station spacing), ~0.31 at 6.6 (three), 0.05 floor
+# from 16 out. Quadratic rather than exponential so the decay stays gradual
+# through the mid-field where the *next* station first becomes visible;
+# exp(-d/2) would already be at 0.05 by 6.
 # --------------------------------------------------------------------------
 
 W_MIN = 0.05
 D_NEAR = 0.5
-D_FAR = 12.0
+D_FAR = 16.0
 
 # --------------------------------------------------------------------------
 # Control rates
@@ -61,14 +63,16 @@ POLICY_DT = 1.0 / POLICY_FREQ
 # --------------------------------------------------------------------------
 # Action space: body acceleration + yaw rate, integrated to a velocity setpoint
 #
-# Z authority is deliberately generous. The course drops from the entry window
-# at z ~= 3.41 to below a 0.40 m blue bar within one 2.5 m station spacing: at
-# 1.5 m/s forward that needs ~2 m/s of descent, which the original env's
-# V_Z = 0.5 could not deliver.
+# Z authority is deliberately generous, and it has to be: consecutive stations
+# are only 2.20 apart, so a blue bar at 0.880 followed by a red bar at 4.356 is
+# a 3.9-unit climb inside one spacing. That is not flyable at full forward
+# speed, which is the point -- MAVRL's whole thesis is that the policy must
+# slow down for the tight sections. The scripted pilot throttles its forward
+# speed by the pending vertical error for the same reason.
 # --------------------------------------------------------------------------
 
-A_MAX = (3.0, 3.0, 4.0)      # m/s^2, body frame
-V_MAX = (2.5, 2.5, 2.5)      # m/s, body frame
+A_MAX = (4.0, 4.0, 6.0)      # m/s^2, body frame
+V_MAX = (3.0, 3.0, 3.0)      # m/s, body frame
 YAW_RATE_MAX = 1.0           # rad/s
 
 N_PROPRIO = 16               # grav(3) gyro(3) vel(3) v_cmd(3) prev_action(4)
@@ -82,24 +86,37 @@ K_PROG = 1.0
 K_TIME = 0.03
 K_SMOOTH = 0.01
 K_CENTER = 0.1
-CENTER_BAND = 1.5            # apply the centering term within this |dy| of a gate
+CENTER_BAND = 2.2            # apply the centering term within one station spacing
 
 R_TOTAL = 150.0              # split evenly across the course's gates
 R_FINISH = 100.0
 R_CRASH = 25.0
 K_TBONUS = 5.0
 
-CORRIDOR_X_LIMIT = 2.0       # terminate past the entry wall if |x| exceeds this
+#: Terminate past the entry wall if |x| exceeds this. The red bar spans
+#: x = +-2.20 and the station posts sit at +-1.65, so anything beyond 2.6 has
+#: left the course rather than dodged within it.
+CORRIDOR_X_LIMIT = 2.6
+
+#: Spawn standoff plus entry-to-exit distance, in SDF units. Imported from
+#: course_world would be circular, so it is restated here and pinned by a test.
+COURSE_LENGTH = 2.20 + (3.30 - (-12.10))          # 17.6
 
 
 def t_nominal(n_stations: int) -> float:
-    """Reference time for the completion speed bonus."""
-    return 4.0 + 2.0 * n_stations
+    """Reference time for the completion speed bonus.
+
+    17.6 units at a 1.6 average, plus a second and a half per bar for the
+    climb/descent each one forces.
+    """
+    return COURSE_LENGTH / 1.6 + 1.5 * n_stations
 
 
 def t_max(n_stations: int) -> float:
-    """Episode time limit, seconds."""
-    return 8.0 + 4.0 * n_stations
+    """Episode time limit, seconds. Generous: the course is 2.2x longer than a
+    competition lap, and a policy that has to slow for a tight pair of stations
+    must not be truncated for doing the right thing."""
+    return COURSE_LENGTH / 0.65 + 4.0 * n_stations
 
 
 # --------------------------------------------------------------------------

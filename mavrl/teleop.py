@@ -62,7 +62,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mavrl import config as C                                    # noqa: E402
 from mavrl.collect import new_frames, record_frame, stack_frames  # noqa: E402
 from mavrl.course_aviary import CourseAviary                     # noqa: E402
-from mavrl.course_world import STAGE_STATIONS, sample_layout     # noqa: E402
+from mavrl.course_world import (                                 # noqa: E402
+    STAGE_STATIONS, YAW_DOWN_COURSE, sample_layout,
+)
 from mavrl.dataset import ShardWriter, summarize                 # noqa: E402
 from mavrl.sensor_noise import NoiseConfig                       # noqa: E402
 
@@ -104,8 +106,8 @@ class KeyboardPilot:
 
         if self.lock_yaw:
             yaw = env.rpy[0, 2]
-            err = math.atan2(math.sin(math.pi / 2 - yaw),
-                             math.cos(math.pi / 2 - yaw))
+            err = math.atan2(math.sin(YAW_DOWN_COURSE - yaw),
+                             math.cos(YAW_DOWN_COURSE - yaw))
             action[3] = np.clip(self.kp_yaw * err / C.YAW_RATE_MAX, -1.0, 1.0)
         else:
             action[3] = float(held[self.pg.K_q]) - float(held[self.pg.K_e])

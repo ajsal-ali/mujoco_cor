@@ -1,172 +1,268 @@
 #!/usr/bin/env python3
-"""Procedural obstacle-course geometry for MAVRL.
+"""The real IMAV2026 arena, with only the bar stations randomized.
 
-Self-contained: no imports from `rl/`, no mujoco at module level, no external
-assets. Everything below is string XML plus MuJoCo builtin texture generators, so
-this module is importable and unit-testable from a clean checkout on any OS.
+The arena is `Files(3)/imav2026_scaled.sdf`, converted to MJCF by
+`imav_teleop.SdfToMjcf` and injected into BaseAviary's XML exactly as
+`imav_play.make_world_injector` does. Nothing is invented and nothing else is
+moved: the entry wall, exit wall, tubes, boxes, turbine, ring board, platforms,
+strips and floor are all the competition geometry.
 
-Course layout (all stations are planes normal to +y, spaced STATION_SPACING):
+Three things vary between episodes, and only these three:
 
-    y = 3.30            entry wall, two openings -- RED is the target,
-                        BLUE is a decoy the policy must learn to reject
-    y = 3.30 + k*2.50   0..3 bar stations. A bar spans the full corridor width;
-                        free space exists above and below it, and the colour
-                        says which side is legal (red -> above, blue -> below)
-    y = exit_y          exit wall, single centred opening
+    * **how many** bar stations are present  (0..3)
+    * **which colour** sits at each station   (red / blue, any order)
+    * **the bar's height**                    (3 options per colour)
 
-Lateral containment is *not* geometric -- the env terminates on |x| > 2.0 past
-the entry wall. That keeps the obstacle set exactly as specified rather than
-adding corridor walls.
+Everything else is fixed. The default stations that ship in the SDF
+(`red_bar`, `blue_bar1`, `blue_bar2` and their posts and feet) are skipped
+during conversion and re-emitted per layout, at the SDF's own station planes and
+with the SDF's own tube radii, post heights and colours.
 
-Note on the background posts: rl.window_world puts three decorative posts at
-y = 5.2 and 6.4, which is inside this corridor and would collide with stations 1
-and 2. They are dropped here; the course itself now provides the depth structure
-they existed to supply.
+Scale
+-----
+The SDF is the competition arena scaled by **2.2x** -- the file name says so and
+the numbers confirm it: `red_bar` sits at z = 4.356 = 2.2 x 1980 mm, `blue_bar`
+at z = 0.880 = 2.2 x 400 mm, stations 2.20 m apart = 2.2 x 1.0 m. Every constant
+in this package is in **SDF units**. The real-world millimetres appear only in
+the comments beside the height tables.
+
+That distinction matters: an earlier version of this file mixed the two, taking
+the entry-window numbers from the SDF (z ~ 3.4) and the bar heights from the
+competition spec (z = 0.4..1.98), which put the drone on a physically wrong 3 m
+dive out of every window.
+
+Direction of travel
+-------------------
+The course runs along **+y**, matching the arena's own `takeoff_platform` at
+y = -14.30: the drone enters through the wall at y = -12.10 and leaves through
+the one at y = +3.30, meeting red_bar -> blue_bar1 -> blue_bar2 -> tube_B ->
+tube_A on the way. The two walls are geometrically identical, so the course is
+symmetric and the direction is pure convention -- but it is the competition's
+convention, and the bars come *before* the tubes because of it.
+
+`course_gates.TRAVEL_SIGN` is the single source of truth; nothing here or in the
+env or the pilot hardcodes a y comparison.
 """
 
 from __future__ import annotations
 
+import math
+import os
 import re
+import sys
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional, Sequence, Tuple
+from pathlib import Path
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from mavrl.config import RENDER_RES
-from mavrl.course_gates import (
-    BarGate, BarSide, GateSequence, Opening, WallGate,
+_REPO = Path(__file__).resolve().parent.parent
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from mavrl.course_gates import (                                  # noqa: E402
+    TRAVEL_SIGN, BarGate, BarSide, GateSequence, Opening, WallGate,
 )
 
+#: The competition arena. `imav_teleop.DEFAULT_SDF` points at the same file.
+SDF_PATH = _REPO / "Files(3)" / "imav2026_scaled.sdf"
+
+#: SDF units per competition metre. Only used to document the height tables.
+SCALE = 2.2
 
 # --------------------------------------------------------------------------
-# Geometry constants. These are the ground truth shared with course_gates --
-# the gate checks and the rendered arena are built from the same numbers, so
-# they cannot drift apart.
+# Fixed arena geometry, read straight out of the SDF
 # --------------------------------------------------------------------------
 
-X_MIN, X_MAX = -2.00, 2.00
-Z_MIN, Z_MAX = 0.00, 5.00
-WALL_HALF_THICK = 0.05
+#: The wall the drone enters through. This is the SDF's `exit_wall_*` -- the
+#: model names are backwards relative to the flight direction, because the
+#: drone starts at the takeoff platform beyond it at y = -14.30.
+ENTRY_Y = -12.10
+#: ...and leaves through the SDF's `obs_wall_*`. Geometrically identical.
+EXIT_Y = 3.30
 
-# Entry wall -- identical to the arena rl/ already trains on.
-ENTRY_Y = 3.30
-RED_X_LO, RED_X_HI = 0.44, 1.32
-BLUE_X_LO, BLUE_X_HI = -1.32, 0.00
-ENTRY_Z_LO, ENTRY_Z_HI = 2.97, 3.85
+#: Openings in both walls. Derived from the frame members, e.g. the red opening
+#: runs from obs_wall_red_L's inner face (0.440) to obs_wall_red_R's (1.320).
+RED_X_LO, RED_X_HI = 0.440, 1.320
+RED_Z_LO, RED_Z_HI = 2.970, 3.850
+BLUE_X_LO, BLUE_X_HI = -1.320, 0.000
+BLUE_Z_LO, BLUE_Z_HI = 2.860, 3.960
 
-# Exit wall -- single centred opening, down in the bar band so the descent
-# through the course is monotone rather than up-down-up.
-EXIT_X_LO, EXIT_X_HI = -0.44, 0.44
-EXIT_Z_LO, EXIT_Z_HI = 1.06, 1.94
+#: Bar-station planes, **in the order the drone meets them**: the SDF's red_bar,
+#: blue_bar1, blue_bar2. Slot 0 is filled first, so a one-bar layout puts its bar
+#: at -9.90, which is the SDF's own first station.
+STATION_Y: Tuple[float, ...] = (-9.90, -7.70, -5.50)
+STATION_SPACING = 2.20
 
-#: Constant gap between consecutive gate planes.
+#: The fixed obstacles between the last bar station and the exit wall. They are
+#: never moved; listed here so the reward, the pilot and the tests know they
+#: exist.
 #:
-#: 4.0 rather than 2.5 because of the vertical profile: the drone leaves the
-#: entry window at z ~= 3.4 and must reach the exit at z = 1.5, or dip under a
-#: blue bar at 0.4. At 2.5 m spacing and ~1.5 m/s that is a 2 m descent in 1.7 s
-#: (~1.2 m/s sustained, arriving with no margin) -- measured result was the
-#: pilot clipping the exit sill at z = 1.06 on essentially every run. At 4.0 m
-#: the same descent has 2.7 s and lands comfortably inside the opening.
-STATION_SPACING = 4.00
+#: `tube_B` (y = -2.20) is a frame: vertical posts at x = +-1.10, a horizontal at
+#: z = 1.014, and a diagonal running from (x=+1.10, z=2.03) to (x=-1.10, z=4.23).
+#: `tube_A` (y = 0.00) is a single post at x = 0 spanning the full height.
+TUBE_B_Y = -2.20
+TUBE_A_Y = 0.00
+TUBE_POST_X = 1.10
 
-# Bars: thin horizontal boxes spanning the full corridor width.
-BAR_HY = 0.05
-BAR_HZ = 0.04
+#: Lateral offset at which to thread `tube_B`, and it is not the window centre.
+#: The exit window's red opening is centred at x = 0.88, which sits only 0.22
+#: from `tube_B_post_R` -- about 0.12 once the post radius and the airframe are
+#: taken off. A straight run from the last bar (x = 0) to the window therefore
+#: passes within the pilot's own lateral overshoot of the post, and does collide.
+#: 0.35 keeps 0.75 from that post, stays above the diagonal (which is at
+#: z = 2.78 for this x) at any sane cruise altitude, and still leaves 0.35 of
+#: clearance past `tube_A` on the way out.
+TUBE_B_SAFE_X = 0.35
 
-RED_BAR_HEIGHTS = (1.20, 1.60, 1.98)
-BLUE_BAR_HEIGHTS = (0.40, 0.80, 1.20)
+#: (y, x) pairs the pilot threads between gates. Not gates -- nothing scores
+#: them -- but a teacher with no obstacle avoidance has to be told about them.
+TUBE_VIAS: Tuple[Tuple[float, float], ...] = ((TUBE_B_Y, TUBE_B_SAFE_X),)
 
-# One height per colour is held out of training entirely, so evaluation on it
-# measures whether the above/below rule generalized or the heights were memorized.
-TRAIN_RED_HEIGHTS = (1.20, 1.98)
-EVAL_RED_HEIGHTS = (1.60,)
-TRAIN_BLUE_HEIGHTS = (0.40, 1.20)
-EVAL_BLUE_HEIGHTS = (0.80,)
+# -- bar station geometry (SDF values, unchanged) --------------------------
+RED_BAR_RADIUS, RED_BAR_LENGTH = 0.044, 4.40
+BLUE_BAR_RADIUS, BLUE_BAR_LENGTH = 0.0396, 3.30
+POST_RADIUS = 0.055
+POST_X = 1.65
+RED_POST_HEIGHT = 4.51
+BLUE_POST_HEIGHT = 2.64
+FOOT_SIZE = (0.44, 0.264, 0.11)
 
-# Spawn standoff from the entry wall, so the drone opens its eyes with the
-# opening comfortably in frame rather than with its nose against the wall.
-SPAWN_STANDOFF = 2.00
-SPAWN_STANDOFF_JIT = 0.30
+RED_RGBA = "0.9 0.1 0.1 1"
+BLUE_RGBA = "0.1 0.2 0.8 1"
+WOOD_RGBA = "0.50 0.35 0.22 1"
 
-_FRAME_BAR = 0.04      # half-width of the coloured frame bars
-_FRAME_Y_OFF = 0.07    # frames sit on the approach (-y) side, so they are visible
+#: Bar heights, in SDF units. The comment is the competition value.
+RED_BAR_HEIGHTS = (2.640, 3.520, 4.356)      # 1200 / 1600 / 1980 mm
+BLUE_BAR_HEIGHTS = (0.880, 1.760, 2.640)     # 400 / 800 / 1200 mm
 
-RED_RGBA = "0.85 0.12 0.12 1"
-BLUE_RGBA = "0.12 0.25 0.85 1"
+#: Held out of training so evaluation can ask whether the *rule* was learned
+#: rather than four specific heights.
+TRAIN_RED_HEIGHTS = (2.640, 4.356)
+EVAL_RED_HEIGHTS = (3.520,)
+TRAIN_BLUE_HEIGHTS = (0.880, 2.640)
+EVAL_BLUE_HEIGHTS = (1.760,)
+
+#: Spawn standoff before the entry wall, i.e. at y = ENTRY_Y - TRAVEL_SIGN*this.
+#: One station spacing, which puts the 0.88-wide window at ~40% of the frame
+#: height -- and lands on y = -14.30, the arena's own takeoff platform plane.
+SPAWN_STANDOFF = 2.20
+SPAWN_STANDOFF_JIT = 0.35
+
+#: Curriculum stages: number of bar stations.
+STAGE_STATIONS = (0, 1, 2, 3)
+
+#: The SDF models that make up the three shipped bar stations. Skipped during
+#: conversion and re-emitted per layout.
+SDF_BAR_MODELS = frozenset({
+    "red_bar", "red_post_L", "red_post_R", "red_foot_L", "red_foot_R",
+    "blue_bar1", "blue_post_L1", "blue_post_R1", "blue_foot_L1", "blue_foot_R1",
+    "blue_bar2", "blue_post_L2", "blue_post_R2", "blue_foot_L2", "blue_foot_R2",
+})
 
 
 # --------------------------------------------------------------------------
-# Semantic classes for the SeVAE segmentation head
+# Semantics
 # --------------------------------------------------------------------------
 
 class SemClass(IntEnum):
     FREE = 0
-    WALL = 1
+    WALL = 1          # wall frames, room, posts and feet -- structure
     RED_WINDOW = 2
     BLUE_WINDOW = 3
     RED_BAR = 4
     BLUE_BAR = 5
     FLOOR = 6
+    OBSTACLE = 7      # tubes, boxes, turbine, ring board, platforms
 
 
 N_SEM_CLASSES = len(SemClass)
 
 
-def classify_geom_name(name: Optional[str]) -> SemClass:
-    """Map a geom name to its semantic class.
+def classify_body_name(name: Optional[str]) -> SemClass:
+    """Body name -> semantic class.
 
-    Unknown and unnamed geoms fall through to FREE -- that covers the drone's
-    own geoms and anything BaseAviary adds, none of which the policy needs to
-    distinguish.
+    Classification is by **body**, not geom: `SdfToMjcf` names its geoms `g1`,
+    `g2`, ... and puts the meaningful name on the enclosing body. Doing it this
+    way covers the converted arena and the bar stations generated here with one
+    rule.
     """
     if not name:
         return SemClass.FREE
-    if name.startswith("entry_frame_red") :
-        return SemClass.RED_WINDOW
-    if name.startswith("entry_frame_blue"):
-        return SemClass.BLUE_WINDOW
-    if name.startswith("bar_red"):
-        return SemClass.RED_BAR
-    if name.startswith("bar_blue"):
-        return SemClass.BLUE_BAR
-    if name.startswith(("entry_wall", "exit_wall")):
+    n = name.lower()
+
+    if "_bar" in n and n.startswith("station"):
+        return SemClass.RED_BAR if "_red_" in n else SemClass.BLUE_BAR
+    if n.startswith("station"):                      # posts and feet
         return SemClass.WALL
-    if any(k in name for k in ("floor", "ground", "plane")):
+
+    if "wall_red" in n or "room_red" in n:
+        return SemClass.RED_WINDOW
+    if "wall_blue" in n or "room_blue" in n:
+        return SemClass.BLUE_WINDOW
+    if n.startswith(("obs_wall", "exit_wall", "room_")):
+        return SemClass.WALL
+
+    if n.startswith(("arena_floor", "strip_", "room_floor", "ground", "floor")):
         return SemClass.FLOOR
-    return SemClass.FREE
+    if n.startswith(("tube_", "box_", "turbine", "ring_board", "platform",
+                     "takeoff_platform", "landing_platform", "lp_")):
+        return SemClass.OBSTACLE
+    return SemClass.WALL
+
+
+def build_geom_class_lut(model) -> np.ndarray:
+    """geom id -> SemClass, via each geom's body name."""
+    import mujoco
+    lut = np.zeros(model.ngeom, dtype=np.uint8)
+    for gid in range(model.ngeom):
+        bid = int(model.geom_bodyid[gid])
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, bid)
+        lut[gid] = int(classify_body_name(name))
+    return lut
 
 
 # --------------------------------------------------------------------------
-# Layout description
+# Layout
 # --------------------------------------------------------------------------
-
-class StationType(IntEnum):
-    RED_BAR = 0     # legal side: above
-    BLUE_BAR = 1    # legal side: below
-
 
 @dataclass(frozen=True)
 class StationSpec:
-    kind: StationType
-    height: float
+    """One bar station: which slot, which colour, how high."""
+
+    index: int          # 0..2, index into STATION_Y
+    colour: str         # "red" | "blue"
+    height: float       # bar centreline, SDF units
+
+    @property
+    def y(self) -> float:
+        return STATION_Y[self.index]
 
     @property
     def side(self) -> BarSide:
-        return BarSide.ABOVE if self.kind is StationType.RED_BAR else BarSide.BELOW
+        """Red = pass above, blue = pass below."""
+        return BarSide.ABOVE if self.colour == "red" else BarSide.BELOW
 
     @property
-    def rgba(self) -> str:
-        return RED_RGBA if self.kind is StationType.RED_BAR else BLUE_RGBA
+    def post_height(self) -> float:
+        return RED_POST_HEIGHT if self.colour == "red" else BLUE_POST_HEIGHT
 
     @property
-    def tag(self) -> str:
-        return "red" if self.kind is StationType.RED_BAR else "blue"
+    def bar_radius(self) -> float:
+        return RED_BAR_RADIUS if self.colour == "red" else BLUE_BAR_RADIUS
+
+    @property
+    def bar_length(self) -> float:
+        return RED_BAR_LENGTH if self.colour == "red" else BLUE_BAR_LENGTH
+
+    def describe(self) -> str:
+        return f"{self.colour}@{self.height:.2f}"
 
 
 @dataclass(frozen=True)
 class CourseLayout:
-    """An ordered course. `stations` may be empty (entry -> exit directly)."""
+    """Entry wall -> fixed obstacles -> 0..3 bar stations -> exit wall."""
 
     stations: Tuple[StationSpec, ...] = ()
 
@@ -174,281 +270,235 @@ class CourseLayout:
     def n_stations(self) -> int:
         return len(self.stations)
 
-    def station_y(self, k: int) -> float:
-        """Plane of the k-th bar station (0-indexed, first one past the entry)."""
-        return ENTRY_Y + (k + 1) * STATION_SPACING
-
     @property
     def exit_y(self) -> float:
-        return ENTRY_Y + (self.n_stations + 1) * STATION_SPACING
-
-    @property
-    def n_gates(self) -> int:
-        return self.n_stations + 2      # entry + bars + exit
+        return EXIT_Y
 
     def describe(self) -> str:
-        if not self.stations:
-            return "entry -> exit"
-        mid = " -> ".join(f"{s.tag}@{s.height:.2f}" for s in self.stations)
+        mid = " -> ".join(s.describe() for s in self.stations) or "(no bars)"
         return f"entry -> {mid} -> exit"
 
 
-# --------------------------------------------------------------------------
-# Layout sampling / curriculum
-# --------------------------------------------------------------------------
-
-#: Curriculum stage -> number of intermediate bar stations.
-STAGE_STATIONS = (0, 1, 2, 3)
-
-
-def heights_for(kind: StationType, split: str = "train") -> Tuple[float, ...]:
-    if split == "train":
-        return TRAIN_RED_HEIGHTS if kind is StationType.RED_BAR else TRAIN_BLUE_HEIGHTS
-    if split == "eval":
-        return EVAL_RED_HEIGHTS if kind is StationType.RED_BAR else EVAL_BLUE_HEIGHTS
-    if split == "all":
-        return RED_BAR_HEIGHTS if kind is StationType.RED_BAR else BLUE_BAR_HEIGHTS
-    raise ValueError(f"unknown split {split!r} (expected train/eval/all)")
+def _entry_wall_gate() -> WallGate:
+    return WallGate(
+        y=ENTRY_Y,
+        target=Opening(RED_X_LO, RED_X_HI, RED_Z_LO, RED_Z_HI),
+        decoy=Opening(BLUE_X_LO, BLUE_X_HI, BLUE_Z_LO, BLUE_Z_HI))
 
 
-def sample_layout(rng: np.random.Generator, n_stations: int,
+def _exit_wall_gate() -> WallGate:
+    # The exit wall is the entry wall duplicated at y = -12.10, so the target is
+    # the red opening there too.
+    return WallGate(
+        y=EXIT_Y,
+        target=Opening(RED_X_LO, RED_X_HI, RED_Z_LO, RED_Z_HI),
+        decoy=Opening(BLUE_X_LO, BLUE_X_HI, BLUE_Z_LO, BLUE_Z_HI))
+
+
+def build_gates(layout: CourseLayout) -> GateSequence:
+    gates: List[object] = [_entry_wall_gate()]
+    for s in layout.stations:
+        gates.append(BarGate(y=s.y, height=s.height, side=s.side))
+    gates.append(_exit_wall_gate())
+    return GateSequence(gates)
+
+
+def heights_for(colour: str, split: str) -> Tuple[float, ...]:
+    if colour == "red":
+        return {"train": TRAIN_RED_HEIGHTS, "eval": EVAL_RED_HEIGHTS,
+                "all": RED_BAR_HEIGHTS}[split]
+    return {"train": TRAIN_BLUE_HEIGHTS, "eval": EVAL_BLUE_HEIGHTS,
+            "all": BLUE_BAR_HEIGHTS}[split]
+
+
+def sample_layout(rng: np.random.Generator, n_stations: int = 3,
                   split: str = "train") -> CourseLayout:
-    """Random station types and heights; count is fixed by the curriculum stage."""
+    """Vary count, colour order and height. Nothing else moves."""
+    n = int(np.clip(n_stations, 0, len(STATION_Y)))
     stations = []
-    for _ in range(n_stations):
-        kind = StationType(int(rng.integers(0, 2)))
-        choices = heights_for(kind, split)
-        stations.append(StationSpec(kind, float(rng.choice(choices))))
+    for i in range(n):
+        colour = "red" if rng.random() < 0.5 else "blue"
+        height = float(rng.choice(heights_for(colour, split)))
+        stations.append(StationSpec(index=i, colour=colour, height=height))
     return CourseLayout(tuple(stations))
 
 
 def sample_layout_for_stage(rng: np.random.Generator, stage: int,
                             split: str = "train") -> CourseLayout:
+    """Curriculum stage -> a layout. Stage k means k bar stations."""
     stage = int(np.clip(stage, 0, len(STAGE_STATIONS) - 1))
     return sample_layout(rng, STAGE_STATIONS[stage], split)
 
 
-def all_layouts(n_stations: int, split: str = "all") -> Tuple[CourseLayout, ...]:
-    """Every (type, height) combination for a given station count.
-
-    Used by the collector to cover the space exhaustively rather than by
-    sampling, and by tests.
-    """
-    from itertools import product
-
-    per_slot = [
-        StationSpec(kind, h)
-        for kind in (StationType.RED_BAR, StationType.BLUE_BAR)
-        for h in heights_for(kind, split)
-    ]
-    return tuple(CourseLayout(combo)
-                 for combo in product(per_slot, repeat=n_stations))
-
-
-# --------------------------------------------------------------------------
-# Gates
-# --------------------------------------------------------------------------
-
-def build_gates(layout: CourseLayout) -> GateSequence:
-    """The gate sequence matching `layout`'s geometry, in flight order."""
-    entry = WallGate(
-        y=ENTRY_Y,
-        target=Opening(RED_X_LO, RED_X_HI, ENTRY_Z_LO, ENTRY_Z_HI),
-        decoy=Opening(BLUE_X_LO, BLUE_X_HI, ENTRY_Z_LO, ENTRY_Z_HI),
-    )
-    gates = [entry]
-    for k, st in enumerate(layout.stations):
-        gates.append(BarGate(y=layout.station_y(k), height=st.height, side=st.side))
-    gates.append(WallGate(
-        y=layout.exit_y,
-        target=Opening(EXIT_X_LO, EXIT_X_HI, EXIT_Z_LO, EXIT_Z_HI),
-        decoy=None,
-    ))
-    return GateSequence(gates)
+def all_layouts(n_stations: int, split: str = "train") -> List[CourseLayout]:
+    """Every colour/height combination -- for exhaustive evaluation."""
+    import itertools
+    out = []
+    per_slot = [[(c, h) for c in ("red", "blue") for h in heights_for(c, split)]
+                for _ in range(n_stations)]
+    for combo in itertools.product(*per_slot):
+        out.append(CourseLayout(tuple(
+            StationSpec(i, c, h) for i, (c, h) in enumerate(combo))))
+    return out
 
 
 def spawn_pose(rng: np.random.Generator) -> Tuple[np.ndarray, float]:
-    """Start pose: SPAWN_STANDOFF metres in front of the entry wall, facing +y."""
-    import math
+    """Start in front of the entry wall, facing down the course (-y).
 
-    standoff = SPAWN_STANDOFF + rng.uniform(-SPAWN_STANDOFF_JIT, SPAWN_STANDOFF_JIT)
-    cx = 0.5 * (RED_X_LO + RED_X_HI)
-    cz = 0.5 * (ENTRY_Z_LO + ENTRY_Z_HI)
-    pos = np.array([
-        cx + rng.uniform(-0.45, 0.45),
-        ENTRY_Y - standoff,
-        cz + rng.uniform(-0.40, 0.40),
-    ])
-    yaw = math.pi / 2 + rng.uniform(-math.radians(15), math.radians(15))
-    return pos, float(yaw)
+    Centred on the RED opening, not on the corridor, so the very first thing the
+    camera sees is the target rather than the decoy.
+    """
+    standoff = SPAWN_STANDOFF + float(rng.uniform(-SPAWN_STANDOFF_JIT,
+                                                  SPAWN_STANDOFF_JIT))
+    x = 0.5 * (RED_X_LO + RED_X_HI) + float(rng.uniform(-0.15, 0.15))
+    z = 0.5 * (RED_Z_LO + RED_Z_HI) + float(rng.uniform(-0.15, 0.15))
+    return (np.array([x, ENTRY_Y - TRAVEL_SIGN * standoff, z]),
+            YAW_DOWN_COURSE)
+
+
+#: Heading that looks along the direction of travel.
+YAW_DOWN_COURSE = math.pi / 2 if TRAVEL_SIGN > 0 else -math.pi / 2
 
 
 # --------------------------------------------------------------------------
-# XML generation
+# XML
 # --------------------------------------------------------------------------
 
-def _box(name: str, cx: float, cy: float, cz: float,
-         hx: float, hy: float, hz: float,
-         material: Optional[str] = None, rgba: Optional[str] = None,
-         collide: bool = True) -> str:
-    """One named box body containing one *named* geom.
+def _cyl(name: str, pos, size, rgba: str, quat: Optional[str] = None) -> str:
+    q = f' quat="{quat}"' if quat else ""
+    return (f'<body name="{name}" pos="{pos[0]:.6g} {pos[1]:.6g} {pos[2]:.6g}"{q}>'
+            f'<geom name="{name}_g" type="cylinder" '
+            f'size="{size[0]:.6g} {size[1]:.6g}" rgba="{rgba}"/></body>')
 
-    Segmentation rendering returns geom ids, so the geom must carry the name --
-    naming only the body would force a detour through `model.geom_bodyid` to
-    recover the semantic class.
+
+def _box(name: str, pos, half, rgba: str) -> str:
+    return (f'<body name="{name}" pos="{pos[0]:.6g} {pos[1]:.6g} {pos[2]:.6g}">'
+            f'<geom name="{name}_g" type="box" '
+            f'size="{half[0]:.6g} {half[1]:.6g} {half[2]:.6g}" '
+            f'rgba="{rgba}"/></body>')
+
+
+#: 90-degree rotation about y: turns a cylinder's axis from +z to +x, which is
+#: how the SDF lays its horizontal bars (`<pose> ... 0 1.5708 0`).
+_BAR_QUAT = "0.7071068 0 0.7071068 0"
+
+
+def station_xml(spec: StationSpec) -> str:
+    """Posts, feet and bar for one station, in the SDF's own style.
+
+    Post height is the SDF's for that colour and does not follow the bar: the
+    shipped blue station already has a 2.64 post carrying a 0.88 bar.
     """
-    look = f'material="{material}"' if material else f'rgba="{rgba}"'
-    con = '' if collide else ' contype="0" conaffinity="0"'
-    return (f'    <body name="{name}" pos="{cx:.4f} {cy:.4f} {cz:.4f}">\n'
-            f'      <geom name="{name}" type="box" '
-            f'size="{hx:.4f} {hy:.4f} {hz:.4f}" {look}{con}/>\n'
-            f'    </body>')
-
-
-def assets_xml() -> str:
-    return """
-    <texture name="mavrl_wall_tex" type="2d" builtin="checker" width="512" height="512"
-             rgb1="0.55 0.55 0.58" rgb2="0.42 0.42 0.46"/>
-    <material name="mavrl_wall_mat" texture="mavrl_wall_tex" texrepeat="6 6"
-              specular="0.2" shininess="0.3"/>"""
-
-
-def _frame_xml(prefix: str, x_lo: float, x_hi: float,
-               z_lo: float, z_hi: float, y: float, rgba: str) -> str:
-    """Four thin coloured bars outlining one opening.
-
-    Visual only (contype 0) -- the traversal test is the geometric plane crossing
-    in course_gates, so these must not narrow the flyable aperture.
-    """
-    cx = 0.5 * (x_lo + x_hi)
-    hx = 0.5 * (x_hi - x_lo)
-    cz = 0.5 * (z_lo + z_hi)
-    hz = 0.5 * (z_hi - z_lo)
-    return "\n".join([
-        _box(f"{prefix}_bot", cx, y, z_lo, hx, 0.02, _FRAME_BAR, rgba=rgba, collide=False),
-        _box(f"{prefix}_top", cx, y, z_hi, hx, 0.02, _FRAME_BAR, rgba=rgba, collide=False),
-        _box(f"{prefix}_left", x_lo, y, cz, _FRAME_BAR, 0.02, hz, rgba=rgba, collide=False),
-        _box(f"{prefix}_right", x_hi, y, cz, _FRAME_BAR, 0.02, hz, rgba=rgba, collide=False),
-    ])
-
-
-def _wall_xml(prefix: str, wall_y: float,
-              openings: Sequence[Tuple[float, float]],
-              z_lo: float, z_hi: float) -> str:
-    """A wall split into segments that leave `openings` (x ranges) hollow.
-
-    `openings` must be sorted and non-overlapping.
-    """
-    ht = WALL_HALF_THICK
-    x_half = 0.5 * (X_MAX - X_MIN)
-    x_mid = 0.5 * (X_MIN + X_MAX)
-    band_cz = 0.5 * (z_lo + z_hi)
-    band_hz = 0.5 * (z_hi - z_lo)
-
-    segs = [
-        _box(f"{prefix}_bottom", x_mid, wall_y, 0.5 * (Z_MIN + z_lo),
-             x_half, ht, 0.5 * (z_lo - Z_MIN), material="mavrl_wall_mat"),
-        _box(f"{prefix}_top", x_mid, wall_y, 0.5 * (z_hi + Z_MAX),
-             x_half, ht, 0.5 * (Z_MAX - z_hi), material="mavrl_wall_mat"),
-    ]
-
-    # Pillars filling the band between openings.
-    edges = [X_MIN]
-    for lo, hi in openings:
-        edges += [lo, hi]
-    edges.append(X_MAX)
-    for i in range(0, len(edges) - 1, 2):
-        lo, hi = edges[i], edges[i + 1]
-        if hi - lo <= 1e-9:
-            continue
-        segs.append(_box(f"{prefix}_pillar{i // 2}", 0.5 * (lo + hi), wall_y, band_cz,
-                         0.5 * (hi - lo), ht, band_hz, material="mavrl_wall_mat"))
-    return "\n".join(segs)
-
-
-def world_xml(layout: CourseLayout) -> str:
-    """Full course worldbody XML for one layout."""
-    parts = [
-        _wall_xml("entry_wall", ENTRY_Y,
-                  [(BLUE_X_LO, BLUE_X_HI), (RED_X_LO, RED_X_HI)],
-                  ENTRY_Z_LO, ENTRY_Z_HI),
-        _frame_xml("entry_frame_red", RED_X_LO, RED_X_HI,
-                   ENTRY_Z_LO, ENTRY_Z_HI, ENTRY_Y - _FRAME_Y_OFF, RED_RGBA),
-        _frame_xml("entry_frame_blue", BLUE_X_LO, BLUE_X_HI,
-                   ENTRY_Z_LO, ENTRY_Z_HI, ENTRY_Y - _FRAME_Y_OFF, BLUE_RGBA),
-    ]
-
-    for k, st in enumerate(layout.stations):
-        parts.append(_box(
-            f"bar_{st.tag}_{k}",
-            0.5 * (X_MIN + X_MAX), layout.station_y(k), st.height,
-            0.5 * (X_MAX - X_MIN), BAR_HY, BAR_HZ,
-            rgba=st.rgba, collide=True))
-
-    parts.append(_wall_xml("exit_wall", layout.exit_y,
-                           [(EXIT_X_LO, EXIT_X_HI)],
-                           EXIT_Z_LO, EXIT_Z_HI))
+    tag = f"station{spec.index}_{spec.colour}"
+    rgba = RED_RGBA if spec.colour == "red" else BLUE_RGBA
+    ph = spec.post_height
+    fx, fy, fz = FOOT_SIZE
+    parts = []
+    for side, sx in (("L", -POST_X), ("R", POST_X)):
+        parts.append(_cyl(f"{tag}_post_{side}", (sx, spec.y, ph / 2),
+                          (POST_RADIUS, ph / 2), rgba))
+        parts.append(_box(f"{tag}_foot_{side}", (sx, spec.y, fz / 2),
+                          (fx / 2, fy / 2, fz / 2), WOOD_RGBA))
+    parts.append(_cyl(f"{tag}_bar", (0.0, spec.y, spec.height),
+                      (spec.bar_radius, spec.bar_length / 2), rgba,
+                      quat=_BAR_QUAT))
     return "\n".join(parts)
 
 
 def patch_offscreen_framebuffer(xml: str, res: int) -> str:
-    """Enlarge MuJoCo's offscreen framebuffer to `res` x `res`.
+    """Widen the offscreen framebuffer to `res`.
 
-    The default is 640x480, so any render above 480 px tall fails outright with
-    "Image height N > framebuffer height 480". BaseAviary's XML already carries a
-    `<global azimuth=... elevation=.../>` inside `<visual>`, so the size
-    attributes are added to that tag rather than a second one being introduced --
-    MuJoCo rejects duplicate `<global>` elements.
+    MuJoCo defaults to 640x480 and rejects a larger render outright. A second
+    `<global>` element is invalid, so the existing tag is edited in place.
     """
-    m = re.search(r"<global\b([^>]*)/>", xml)
-    if m:
-        attrs = m.group(1)
-        attrs = re.sub(r'\s*off(width|height)="[^"]*"', "", attrs)
-        return (xml[:m.start()]
-                + f'<global{attrs} offwidth="{res}" offheight="{res}"/>'
-                + xml[m.end():])
-    if "<visual>" in xml:
-        return xml.replace(
-            "<visual>",
-            f'<visual>\n    <global offwidth="{res}" offheight="{res}"/>', 1)
-    raise RuntimeError(
-        "course_world: no <visual> block to size the offscreen framebuffer in")
+    want = f'offwidth="{res}" offheight="{res}"'
+    if re.search(r"<global\b[^>]*>", xml):
+        def _fix(m):
+            tag = m.group(0)
+            tag = re.sub(r'\soffwidth="\d+"', "", tag)
+            tag = re.sub(r'\soffheight="\d+"', "", tag)
+            return tag[:-2].rstrip() + f" {want}/>" if tag.endswith("/>") \
+                else tag[:-1].rstrip() + f" {want}>"
+        return re.sub(r"<global\b[^>]*/?>", _fix, xml, count=1)
+    return xml.replace("<visual>", f"<visual><global {want}/>", 1)
 
 
-def make_course_world_injector(layout: CourseLayout,
-                               render_res: int = RENDER_RES):
-    """Return (original, patched) for `BaseAviary._generate_aviary_xml`.
+class _CourseSdf:
+    """`SdfToMjcf` with the shipped bar stations left out.
 
-    Same patch-and-restore mechanism rl.window_world uses, so the env's call site
-    is a two-line context. The package import is deferred to here so everything
-    above stays importable without mujoco.
+    Lazily imported and cached: the conversion walks 100+ models and rasterizes
+    textures, and the fixed part of the arena is identical for every layout, so
+    it is done once per process rather than once per `set_layout`.
     """
-    from multi_drone_mujoco.envs import base_aviary as _BA
 
-    original = _BA._generate_aviary_xml
+    _cache = None
+
+    @classmethod
+    def get(cls):
+        if cls._cache is not None:
+            return cls._cache
+        from imav_teleop import SdfToMjcf
+
+        class _Skipping(SdfToMjcf):
+            def _convert_static_model(self, model):
+                if model.get("name") in SDF_BAR_MODELS:
+                    return
+                super()._convert_static_model(model)
+
+        conv = _Skipping(SDF_PATH, include_dolls=False)
+        conv.build()
+        cls._cache = ("\n".join(conv.assets), "\n".join(conv.bodies))
+        return cls._cache
+
+
+def make_course_world_injector(layout: CourseLayout, render_res: int = 512):
+    """`base_aviary._generate_aviary_xml` replacement: arena + this layout.
+
+    Same mechanism as `imav_play.make_world_injector` -- the package's own drone
+    XML with the arena appended, no repo files edited.
+    """
+    import xml.etree.ElementTree as ET
+    from multi_drone_mujoco.envs import base_aviary as BA
+
+    if not SDF_PATH.exists():
+        raise FileNotFoundError(
+            f"the IMAV arena is missing: {SDF_PATH}\n"
+            f"It lives in git history -- restore it with:\n"
+            f'  git checkout 1241352 -- "Files(3)" imav_play.py imav_teleop.py')
+
+    world_assets, world_bodies = _CourseSdf.get()
+    bars = "\n".join(station_xml(s) for s in layout.stations)
+    original = BA._generate_aviary_xml
 
     def patched(*args, **kwargs):
-        xml = original(*args, **kwargs)
-        if "</asset>" not in xml or "</worldbody>" not in xml:
-            raise RuntimeError(
-                "course_world: generated XML has no <asset>/<worldbody> to "
-                "splice into -- the base XML layout changed.")
-        xml = xml.replace("</asset>", assets_xml() + "\n  </asset>", 1)
-        xml = xml.replace("</worldbody>", world_xml(layout) + "\n  </worldbody>", 1)
-        return patch_offscreen_framebuffer(xml, render_res)
+        root = ET.fromstring(original(*args, **kwargs))
+        compiler = root.find("compiler")
+        if compiler is not None:
+            compiler.set("inertiafromgeom", "auto")
+        asset = root.find("asset")
+        for el in ET.fromstring(f"<r>{world_assets}</r>"):
+            asset.append(el)
+        worldbody = root.find("worldbody")
+        for floor in worldbody.findall("geom[@name='floor']"):
+            worldbody.remove(floor)          # the arena brings its own
+        for el in ET.fromstring(f"<r>{world_bodies}</r>"):
+            worldbody.append(el)
+        if bars:
+            for el in ET.fromstring(f"<r>{bars}</r>"):
+                worldbody.append(el)
+        return patch_offscreen_framebuffer(
+            ET.tostring(root, encoding="unicode"), render_res)
 
     return original, patched
 
 
-def build_geom_class_lut(model) -> np.ndarray:
-    """geom_id -> SemClass lookup for the segmentation buffer.
-
-    Needs a live mujoco model, so it is called from the env, not from here.
-    """
-    import mujoco
-
-    lut = np.full(model.ngeom, SemClass.FREE, dtype=np.uint8)
-    for gid in range(model.ngeom):
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, gid)
-        lut[gid] = int(classify_geom_name(name))
-    return lut
+if __name__ == "__main__":
+    rng = np.random.default_rng(0)
+    for n in STAGE_STATIONS:
+        lay = sample_layout(rng, n, "all")
+        gates = build_gates(lay)
+        print(f"{n} bars: {lay.describe()}")
+        for g in gates.gates:
+            kind = "wall" if isinstance(g, WallGate) else f"bar {g.side.name}"
+            print(f"    y={g.y:+7.2f}  {kind:<12} target_z="
+                  f"{getattr(g, 'target_z', g.center[2]):.3f}")
