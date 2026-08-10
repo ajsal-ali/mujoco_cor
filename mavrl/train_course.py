@@ -8,6 +8,11 @@ Stage 4  --curriculum --init ckpt/...   full curriculum, warm-started from BC.
 The curriculum switches layout for **every env at once**, at a rollout boundary.
 Switching mid-rollout would invalidate the value estimates already collected
 against the old geometry.
+
+Two artefacts land in `--out` as the run goes: `log.jsonl`, one row per rollout,
+and `curves.png`, that log plotted. The PNG is rewritten every `--plot-every`
+rollouts and again on exit, so a run on a remote box can be watched by pulling
+one file -- no TensorBoard process to keep alive alongside it.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from mavrl.policy import MavrlActorCritic, load_policy_state     # noqa: E402
 from mavrl.ppo import PPOConfig, RecurrentPPO                    # noqa: E402
 from mavrl.sensor_noise import NoiseConfig                       # noqa: E402
 from mavrl.vecenv import build_venv                              # noqa: E402
+from mavrl.visualize import save_training_curves                 # noqa: E402
 
 
 class WarmStartFreeze:
@@ -66,7 +72,7 @@ class WarmStartFreeze:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", type=Path, default=Path("runs/course"))
-    p.add_argument("--timesteps", type=int, default=5_000_000)
+    p.add_argument("--timesteps", type=int, default=500_000_000)
     p.add_argument("--n-envs", type=int, default=8)
     p.add_argument("--memory-type", default="lstm",
                    choices=("lstm", "attention", "none"))
@@ -83,6 +89,10 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no-subproc", action="store_true")
+    p.add_argument("--plot-every", type=int, default=10,
+                   help="rollouts between redraws of curves.png; 0 = only at the end")
+    p.add_argument("--plot-smooth", type=int, default=15,
+                   help="trailing-mean width, in rollouts, for the curves")
     args = p.parse_args(argv)
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -119,15 +129,31 @@ def main(argv=None) -> int:
 
     warmup = WarmStartFreeze(policy, args.critic_warmup if args.init else 0)
     log_path = args.out / "log.jsonl"
-    recent_success = deque(maxlen=200)
-    recent_agv = deque(maxlen=200)
+    plot_path = args.out / "curves.png"
+    # 200 episodes is ~25 rollouts at 8 envs: long enough that the success rate
+    # is not quantized into eighths, short enough to still move within a stage.
+    recent = {k: deque(maxlen=200)
+              for k in ("success", "return", "agv", "ep_len", "gates")}
+
+    def draw_curves() -> None:
+        """A broken plot must never take down a run that is otherwise fine."""
+        try:
+            save_training_curves(log_path, plot_path, args.plot_smooth)
+        except Exception as exc:                      # pragma: no cover
+            print(f"[plot] skipped: {exc}", flush=True)
 
     def on_rollout_end(algo: RecurrentPPO, rollout: int, stats: dict) -> None:
         infos = algo.episode_infos
         algo.episode_infos = []
         for info in infos:
-            recent_success.append(bool(info.get("is_success", False)))
-            recent_agv.append(float(info.get("agv", 0.0)))
+            recent["success"].append(float(info.get("is_success", False)))
+            recent["return"].append(float(info.get("ep_return", 0.0)))
+            recent["agv"].append(float(info.get("agv", 0.0)))
+            recent["ep_len"].append(float(info.get("ep_len", 0)))
+            # Partial credit. Success is all-or-nothing, so early in a stage it
+            # sits at zero while the policy is in fact learning gate 1 of 3.
+            n_gates = max(1, int(info.get("n_gates", 1)))
+            recent["gates"].append(float(info.get("gates_cleared", 0)) / n_gates)
         sampler.record_episodes(infos)
 
         if warmup.maybe_release(algo.num_timesteps):
@@ -139,9 +165,8 @@ def main(argv=None) -> int:
             "rollout": rollout,
             "timesteps": algo.num_timesteps,
             "stage": sampler.stage,
-            "success": float(np.mean(recent_success)) if recent_success else 0.0,
-            "agv": float(np.mean(recent_agv)) if recent_agv else 0.0,
             "episodes": len(infos),
+            **{k: float(np.mean(v)) if v else 0.0 for k, v in recent.items()},
             **stats,
         }
         with log_path.open("a") as fh:
@@ -149,8 +174,12 @@ def main(argv=None) -> int:
 
         if rollout % 5 == 0:
             print(f"[{algo.num_timesteps:>9}] {sampler.describe()} "
-                  f"agv={row['agv']:.2f} pg={stats['pg']:+.4f} "
+                  f"ret={row['return']:+.2f} agv={row['agv']:.2f} "
+                  f"pg={stats['pg']:+.4f} "
                   f"vf={stats['vf']:.4f} kl={stats['kl']:.4f}", flush=True)
+
+        if args.plot_every and rollout % args.plot_every == 0:
+            draw_curves()
 
         if args.curriculum:
             new_layout = sampler.on_rollout_end()
@@ -164,6 +193,7 @@ def main(argv=None) -> int:
         algo.learn(args.timesteps, on_rollout_end=on_rollout_end)
     finally:
         algo.save(args.out / "final.pt")
+        draw_curves()          # also covers Ctrl-C and a crash mid-run
         venv.close()
     print("saved", args.out / "final.pt")
     return 0

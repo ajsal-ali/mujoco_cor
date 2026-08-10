@@ -180,6 +180,11 @@ class RecurrentPPO:
         self._ep_start = np.ones(self.n_envs, dtype=np.float32)
         self.num_timesteps = 0
         self.episode_infos = []
+        # Per-env accumulators for the finished-episode return/length. The env's
+        # info dict cannot carry these -- an episode outlives a rollout, so only
+        # the loop that owns the step sequence can sum it.
+        self._ep_return = np.zeros(self.n_envs, dtype=np.float64)
+        self._ep_len = np.zeros(self.n_envs, dtype=np.int64)
 
     # -- rollout -------------------------------------------------------------
 
@@ -199,9 +204,15 @@ class RecurrentPPO:
                 logp.cpu().numpy(), value.cpu().numpy(),
                 reward, done.astype(np.float32), self._ep_start)
 
+            self._ep_return += reward
+            self._ep_len += 1
             for i, d in enumerate(done):
                 if d:
-                    self.episode_infos.append(infos[i])
+                    self.episode_infos.append(
+                        dict(infos[i], ep_return=float(self._ep_return[i]),
+                             ep_len=int(self._ep_len[i])))
+                    self._ep_return[i] = 0.0
+                    self._ep_len[i] = 0
             self._ep_start = done.astype(np.float32)
             self._obs = obs
             self.num_timesteps += self.n_envs
