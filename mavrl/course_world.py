@@ -405,22 +405,41 @@ def station_xml(spec: StationSpec) -> str:
     return "\n".join(parts)
 
 
-def patch_offscreen_framebuffer(xml: str, res: int) -> str:
-    """Widen the offscreen framebuffer to `res`.
-
-    MuJoCo defaults to 640x480 and rejects a larger render outright. A second
-    `<global>` element is invalid, so the existing tag is edited in place.
-    """
-    want = f'offwidth="{res}" offheight="{res}"'
-    if re.search(r"<global\b[^>]*>", xml):
+def _set_visual_attrs(xml: str, tag: str, attrs: str) -> str:
+    """Force `attrs` onto the first `<tag>` under `<visual>`, creating it if
+    absent. A second element of the same name is invalid MJCF, so an existing
+    one is edited in place rather than appended to."""
+    names = re.findall(r"(\w+)=", attrs)
+    pattern = rf"<{tag}\b[^>]*/?>"
+    if re.search(pattern, xml):
         def _fix(m):
-            tag = m.group(0)
-            tag = re.sub(r'\soffwidth="\d+"', "", tag)
-            tag = re.sub(r'\soffheight="\d+"', "", tag)
-            return tag[:-2].rstrip() + f" {want}/>" if tag.endswith("/>") \
-                else tag[:-1].rstrip() + f" {want}>"
-        return re.sub(r"<global\b[^>]*/?>", _fix, xml, count=1)
-    return xml.replace("<visual>", f"<visual><global {want}/>", 1)
+            t = m.group(0)
+            for n in names:
+                t = re.sub(rf'\s{n}="[^"]*"', "", t)
+            return (t[:-2].rstrip() + f" {attrs}/>") if t.endswith("/>") \
+                else (t[:-1].rstrip() + f" {attrs}>")
+        return re.sub(pattern, _fix, xml, count=1)
+    return xml.replace("<visual>", f"<visual><{tag} {attrs}/>", 1)
+
+
+def patch_offscreen_framebuffer(xml: str, res: int, offsamples: int = 0) -> str:
+    """Size the offscreen framebuffer to `res` and set its multisampling.
+
+    MuJoCo defaults to 640x480 and rejects a larger render outright, hence
+    `offwidth`/`offheight`.
+
+    `offsamples=0` disables multisampling, and is not merely a performance
+    choice. MuJoCo asks for a 4x multisampled offscreen buffer by default, and
+    NVIDIA's surfaceless EGL contexts reject that combination with
+    GL_FRAMEBUFFER_UNSUPPORTED (0x8CDD) -- headless GPU rendering fails outright
+    while the same model renders fine under GLX or osmesa. Antialiasing would be
+    thrown away here in any case: depth is **min-pooled** 512 -> 128 and
+    segmentation is nearest-sampled, so smoothed edges would either be discarded
+    or, for seg, blend two class ids into a third that means nothing.
+    """
+    xml = _set_visual_attrs(xml, "global",
+                            f'offwidth="{res}" offheight="{res}"')
+    return _set_visual_attrs(xml, "quality", f'offsamples="{offsamples}"')
 
 
 class _CourseSdf:
