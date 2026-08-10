@@ -20,6 +20,18 @@ keeps them:
 Sharded per batch of episodes: at 128^2 with RGB-D, clean RGB-D, seg and depth,
 one frame is ~115 kB, so 2000 episodes lands in the tens of GB if written as a
 single file.
+
+Window indices are **shard-local**. `ep_start` restarts at 0 in every shard, so
+a window start only means something paired with the shard it came from. The
+train/val split therefore partitions *episodes* while preserving that pairing;
+flattening the windows into one global list is exactly what produced
+
+    ValueError: all input arrays must have the same shape
+
+-- a start from shard 3 sliced against shard 0's arrays runs off the end, numpy
+silently returns a short slice, and `np.stack` is the first thing to notice.
+`_shard_windows` now asserts every window lies inside its shard so that the
+failure, if it ever recurs, names the episode instead of a stack call.
 """
 
 from __future__ import annotations
@@ -92,54 +104,142 @@ class SequenceDataset:
     epoch. The obvious per-window `np.load` is catastrophically slow -- a
     compressed npz is fully decompressed on every access, so a 2-shard, 1621
     frame set took longer to iterate than it took to generate.
+
+    `split` partitions by episode, never by window: windows overlap by
+    `seq_len - stride` frames, so a window-level split leaks almost the whole
+    training set into val. Build the train and val views with the *same*
+    `split_seed` or the two halves will overlap.
     """
 
     def __init__(self, root, seq_len: int = 32,
-                 keys: Optional[Sequence[str]] = None, stride: int = 4):
+                 keys: Optional[Sequence[str]] = None, stride: int = 4,
+                 split: Optional[str] = None, val_frac: float = 0.2,
+                 split_seed: int = 0, stratify_by_layout: bool = True):
         self.root = Path(root)
         self.shards = sorted(self.root.glob("*.npz"))
         if not self.shards:
             raise FileNotFoundError(f"no .npz shards under {self.root}")
+        if split not in (None, "train", "val"):
+            raise ValueError(f"split must be None, 'train' or 'val', got {split!r}")
         self.seq_len = seq_len
         self.stride = max(1, stride)
+        self.split = split
         self.keys = tuple(keys) if keys else (
             "image", "image_gt", "seg", "depth_m", "proprio", "action")
+        self.episodes = self._select_episodes(
+            split, val_frac, split_seed, stratify_by_layout)
         self._windows = self._build_index()
 
-    def _shard_windows(self, ep_start, ep_len):
-        """Window start offsets that stay inside a single episode."""
+    # -- episode-level bookkeeping -------------------------------------------
+
+    def _read_headers(self):
+        """(ep_start, ep_len, ep_layout, n_frames) per shard, headers only."""
+        headers = []
+        for path in self.shards:
+            with np.load(path) as z:
+                layout = (z["ep_layout"].tolist() if "ep_layout" in z.files
+                          else [""] * len(z["ep_len"]))
+                headers.append((z["ep_start"].astype(np.int64),
+                                z["ep_len"].astype(np.int64),
+                                layout,
+                                int(len(z["image"]))))
+        return headers
+
+    def _select_episodes(self, split, val_frac, seed, stratify):
+        """List of (shard_idx, ep_idx) kept by this view."""
+        self._headers = self._read_headers()
+        all_eps = [(si, ei)
+                   for si, (_, ep_len, _, _) in enumerate(self._headers)
+                   for ei in range(len(ep_len))]
+        if split is None:
+            return all_eps
+        if not 0.0 < val_frac < 1.0:
+            raise ValueError(f"val_frac must be in (0,1), got {val_frac}")
+
+        rng = np.random.default_rng(seed)
+        # Stratify so val is not one layout's worth of episodes. With a handful
+        # of episodes the val number is noisy either way -- this only stops it
+        # being systematically noisy.
+        groups: dict = {}
+        for si, ei in all_eps:
+            key = self._headers[si][2][ei] if stratify else ""
+            groups.setdefault(key, []).append((si, ei))
+
+        val, train = [], []
+        for key in sorted(groups):
+            eps = groups[key]
+            perm = rng.permutation(len(eps))
+            n_val = int(round(val_frac * len(eps)))
+            n_val = min(max(n_val, 1), len(eps) - 1) if len(eps) > 1 else 0
+            val.extend(eps[i] for i in perm[:n_val])
+            train.extend(eps[i] for i in perm[n_val:])
+        chosen = sorted(val if split == "val" else train)
+        if not chosen:
+            raise ValueError(
+                f"split={split!r} is empty: {len(all_eps)} episode(s) across "
+                f"{len(self.shards)} shard(s) at val_frac={val_frac}. Collect "
+                f"more episodes or set split=None.")
+        return chosen
+
+    def _shard_windows(self, ep_start, ep_len, n_frames, ep_ids=None):
+        """Window start offsets that stay inside a single episode.
+
+        Offsets are shard-local. The bound check is the guard against ever
+        again mixing an index from one shard with another shard's arrays.
+        """
         out = []
-        for s, ln in zip(ep_start, ep_len):
+        ids = ep_ids if ep_ids is not None else range(len(ep_len))
+        for ei, s, ln in zip(ids, ep_start, ep_len):
+            s, ln = int(s), int(ln)
+            if s + ln > n_frames:
+                raise ValueError(
+                    f"episode {ei} spans [{s},{s + ln}) but its shard holds "
+                    f"only {n_frames} frames -- shard header is inconsistent, "
+                    f"or a global index was passed where a shard-local one "
+                    f"was expected")
             if ln < self.seq_len:
                 continue
-            out.extend(range(int(s), int(s) + int(ln) - self.seq_len + 1,
-                             self.stride))
+            out.extend(range(s, s + ln - self.seq_len + 1, self.stride))
         return out
 
     def _build_index(self):
-        """Per-shard window lists, read from the small header arrays only."""
-        windows = []
-        for path in self.shards:
-            with np.load(path) as z:
-                windows.append(self._shard_windows(z["ep_start"], z["ep_len"]))
+        """Per-shard window lists for the episodes this view kept."""
+        windows = [[] for _ in self.shards]
+        for si, ei in self.episodes:
+            ep_start, ep_len, _, n_frames = self._headers[si]
+            windows[si].extend(self._shard_windows(
+                ep_start[ei:ei + 1], ep_len[ei:ei + 1], n_frames, ep_ids=(ei,)))
         return windows
+
+    # -- iteration ------------------------------------------------------------
 
     def __len__(self) -> int:
         return sum(len(w) for w in self._windows)
 
+    def n_episodes(self) -> int:
+        return len(self.episodes)
+
     def iter_batches(self, batch_size: int, rng: np.random.Generator,
-                     shuffle: bool = True) -> Iterator[dict]:
+                     shuffle: bool = True,
+                     drop_last: bool = True) -> Iterator[dict]:
+        """Yield (B, seq_len, ...) batches.
+
+        `drop_last=False` also keeps shards holding fewer than `batch_size`
+        windows. The default drops them, which for a small val split can throw
+        away every shard and report a loss of 0.0 -- pass False for evaluation.
+        """
         order = (rng.permutation(len(self.shards)) if shuffle
                  else np.arange(len(self.shards)))
         for si in order:
             starts = list(self._windows[si])
-            if len(starts) < batch_size:
+            if not starts or (drop_last and len(starts) < batch_size):
                 continue
             with np.load(self.shards[si]) as z:
                 data = {k: z[k] for k in self.keys}
             if shuffle:
                 rng.shuffle(starts)
-            for b in range(0, len(starts) - batch_size + 1, batch_size):
+            stop = (len(starts) - batch_size + 1 if drop_last else len(starts))
+            for b in range(0, stop, batch_size):
                 idx = starts[b:b + batch_size]
                 yield {k: np.stack([v[s:s + self.seq_len] for s in idx])
                        for k, v in data.items()}
