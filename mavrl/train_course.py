@@ -85,6 +85,10 @@ def main(argv=None) -> int:
     p.add_argument("--critic-warmup", type=int, default=30_000)
     p.add_argument("--sensor-noise", type=float, default=1.0)
     p.add_argument("--n-steps", type=int, default=128)
+    p.add_argument("--envs-per-batch", type=int, default=None,
+                   help="minibatch size in envs (default n_envs//2). Each "
+                        "minibatch decodes envs_per_batch * n_steps frames at "
+                        "once, so this is the VRAM knob, not --n-envs")
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -123,8 +127,10 @@ def main(argv=None) -> int:
         load_policy_state(policy, ckpt["policy"], ckpt.get("aux_segments"))
         print("warm-started from", args.init)
 
+    per_batch = (args.envs_per_batch if args.envs_per_batch
+                 else max(1, args.n_envs // 2))
     cfg = PPOConfig(n_steps=args.n_steps, learning_rate=args.lr,
-                    envs_per_batch=max(1, args.n_envs // 2))
+                    envs_per_batch=min(per_batch, args.n_envs))
     algo = RecurrentPPO(policy, venv, cfg, device=args.device)
 
     warmup = WarmStartFreeze(policy, args.critic_warmup if args.init else 0)
