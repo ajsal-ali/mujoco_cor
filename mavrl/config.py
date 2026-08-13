@@ -162,5 +162,5 @@ LAMBDA_SEG = 1.0
 
 SUCCESS_WINDOW = 200         # episodes in the rolling success estimate
 SUCCESS_THRESHOLD = 0.8      # advance a stage above this
-RESAMPLE_EVERY_ROLLOUTS = 10 # resample the layout this often within a stage
+RESAMPLE_EVERY_ROLLOUTS = 50 # redraw the bar heights this often within a stage
 MAX_DWELL_ROLLOUTS = 400     # force-advance if a stage stalls

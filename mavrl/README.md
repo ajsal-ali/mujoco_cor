@@ -318,11 +318,60 @@ All parallel envs share one layout at a time; the curriculum broadcasts a new on
 **rollout boundary** via `venv.env_method("set_layout", …)`. Switching mid-rollout would
 invalidate value estimates already collected against the old geometry.
 
+That one-layout rule is also what makes **shared rendering** legal, and `build_venv` uses it by
+default: N envs run in M = `ceil(N/4)` processes, each holding a single GL context and a single
+copy of the arena, instead of one context and one copy per env. Rasterisation work is unchanged
+— still N frames per vec step — but VRAM scales with M, which is what lets `--n-envs` grow past
+the point where the card fills up at 20 % utilisation. Tune it with `--render-workers`, or fall
+back to one context per env with `--no-shared-render` when a rendering bug is suspected.
+Segmentation is not rendered on this path: the training env never runs `collect_mode`, so that
+pass was a full render per frame thrown away.
+
+A layout swap compiles a new `MjModel` per env, so the shared renderer re-adopts it
+(`SharedStaticRenderer.rebind`) immediately after `set_layout` returns and re-asserts that every
+env in the group took the same geometry. Without that it would keep rasterising the *previous*
+course — wrong pixels, no error.
+
 Stations sit on the SDF's own planes, in travel order (y = −9.90 / −7.70 / −5.50, 2.20 apart); red bars at
 2.640 / 3.520 / 4.356, blue at 0.880 / 1.760 / 2.640; spawn 2.20 before the entry wall,
 centred on the red opening so the target is the first thing the camera sees. Advancement is on
 a rolling 200-episode success rate above 80 %, with a forced advance after 400 rollouts so a
 stalled stage cannot deadlock the run.
+
+Within a stage **only the bar heights are redrawn**, every 50 rollouts; station count and colour
+order change when the stage does and not otherwise. Heights come from `--split`: the default
+`train` holds red 3.520 and blue 1.760 back so `evaluate.py` can ask whether the colour rule
+generalized, and `--split all` trains on all three per colour, which gives that question up.
+
+### Pinning one stage
+
+`--stage N` starts there, and stage 3 is `max_stage`, so the advancement branch can never fire
+— the run stays on the full course. Keep `--curriculum` anyway: it is the only thing that calls
+`broadcast_layout`, so without it the heights never get redrawn either and the policy trains
+against one frozen course for the entire run.
+
+```bash
+python -m mavrl.train_course --stage 3 --curriculum --split all \
+    --init runs/course/final.pt --memory-type attention --mem-tokens 4 \
+    --frozen-encoder --n-envs 60 --envs-per-batch 8 --n-steps 64 --out runs/stage3
+```
+
+`--init` takes a PPO checkpoint as readily as `bc_init.pt` — `RecurrentPPO.save` writes the same
+`"policy"` key. Leave `--critic-warmup` at its default when jumping stages: `R_TOTAL` is split
+across gates, so per-gate credit drops from 75 at stage 0 to 30 at stage 3 and the value head
+arrives calibrated to the wrong scale even though the actor does not.
+
+That same split is why **stage 3 returns are lower by construction** and not a symptom: five
+gates instead of two, longer episodes, more accumulated `K_TIME`. Read the `gates` panel in
+`curves.png` instead — it is the fraction cleared, so it compares across stages in a way raw
+return does not. Gates climbing while return is flat is a run that is working.
+
+The trap in a pinned stage is that colour order is drawn **once**, at `CourseSampler`
+construction, from `--seed`, and never redrawn — nothing advances the stage. With only heights
+varying, red→blue→red is a fixed sequence the policy can fly as *up, down, up* without ever
+reading colour, which looks like success until the arrangement changes. Check it with
+`evaluate.py` on a different colour order before believing a stage-3 success rate; if it
+collapses there, rotate `--seed` across runs.
 
 **Consecutive stations are only 2.20 apart**, so a blue bar at 0.880 followed by a red at
 4.356 is a 3.5-unit swing inside one spacing. That is not flyable at full forward speed —

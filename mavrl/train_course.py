@@ -80,6 +80,11 @@ def main(argv=None) -> int:
     p.add_argument("--stage", type=int, default=None,
                    help="fix the curriculum stage (no advancement)")
     p.add_argument("--curriculum", action="store_true")
+    p.add_argument("--split", default="train", choices=("train", "eval", "all"),
+                   help="which bar heights to train on. 'train' holds red "
+                        "3.520 / blue 1.760 back so evaluate.py can ask whether "
+                        "the colour rule generalized; 'all' trains on all three "
+                        "per colour and gives that up")
     p.add_argument("--frozen-encoder", action="store_true")
     p.add_argument("--init", type=Path, default=None)
     p.add_argument("--critic-warmup", type=int, default=30_000)
@@ -93,6 +98,12 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no-subproc", action="store_true")
+    p.add_argument("--render-workers", type=int, default=None,
+                   help="M: processes sharing one GL context each "
+                        "(default ceil(n_envs/4)). This is the VRAM knob for "
+                        "rendering, as --envs-per-batch is for the backward pass")
+    p.add_argument("--no-shared-render", action="store_true",
+                   help="one GL context per env (SubprocVecEnv), the old path")
     p.add_argument("--plot-every", type=int, default=10,
                    help="rollouts between redraws of curves.png; 0 = only at the end")
     p.add_argument("--plot-smooth", type=int, default=15,
@@ -107,10 +118,15 @@ def main(argv=None) -> int:
              if args.sensor_noise > 0 else NoiseConfig.disabled())
 
     start_stage = args.stage if args.stage is not None else 0
-    sampler = CourseSampler(seed=args.seed, split="train",
+    sampler = CourseSampler(seed=args.seed, split=args.split,
                             start_stage=start_stage)
     venv = build_venv(sampler.layout, args.n_envs, args.seed, noise,
-                      subproc=not args.no_subproc)
+                      subproc=not args.no_subproc,
+                      shared_render=not args.no_shared_render,
+                      render_workers=args.render_workers)
+    print(f"{args.n_envs} envs over "
+          f"{getattr(venv, 'n_workers', args.n_envs)} render context(s)",
+          flush=True)
 
     # "none" is the no-memory ablation: an LSTM with a 1-step window would still
     # be recurrent, so instead we keep the LSTM module but zero its state every

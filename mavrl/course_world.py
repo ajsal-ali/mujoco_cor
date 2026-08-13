@@ -50,7 +50,7 @@ import math
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -328,6 +328,20 @@ def sample_layout_for_stage(rng: np.random.Generator, stage: int,
     """Curriculum stage -> a layout. Stage k means k bar stations."""
     stage = int(np.clip(stage, 0, len(STAGE_STATIONS) - 1))
     return sample_layout(rng, STAGE_STATIONS[stage], split)
+
+
+def resample_heights(rng: np.random.Generator, layout: CourseLayout,
+                     split: str = "train") -> CourseLayout:
+    """Same stations, same colours, new heights.
+
+    The narrow within-stage variation: only the bars move. A course whose colour
+    order also changed varies two things at once, so a policy that improves
+    cannot be attributed to either -- and the vertical profile is the part the
+    memory has to hold, so it is the part worth resampling on its own.
+    """
+    return CourseLayout(tuple(
+        replace(s, height=float(rng.choice(heights_for(s.colour, split))))
+        for s in layout.stations))
 
 
 def all_layouts(n_stations: int, split: str = "train") -> List[CourseLayout]:

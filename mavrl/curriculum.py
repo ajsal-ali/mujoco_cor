@@ -4,8 +4,12 @@
 Two triggers, as specified:
   * a stage advances once rolling success clears a threshold -- progression is
     earned, not timed;
-  * within a stage the specific layout resamples every K rollouts, so the policy
-    sees variety without the difficulty running ahead of it.
+  * within a stage only the **bar heights** resample, every K rollouts, so the
+    policy sees variety without the difficulty running ahead of it.
+
+Station count and colour order change only when the stage does. Resampling them
+every K rollouts as well would move three things at once, and a course that is
+suddenly blue-first is a different task, not a variation on the same one.
 
 **All envs share one layout at a time.** The sampler produces a layout and it is
 broadcast to every worker at a rollout boundary. That is what keeps a
@@ -30,7 +34,7 @@ from mavrl.config import (
     SUCCESS_WINDOW,
 )
 from mavrl.course_world import (
-    STAGE_STATIONS, CourseLayout, sample_layout_for_stage,
+    STAGE_STATIONS, CourseLayout, resample_heights, sample_layout_for_stage,
 )
 
 
@@ -106,7 +110,13 @@ class CourseSampler:
             return self.state.layout
 
         if self.state.rollouts_in_stage % self.resample_every == 0:
-            self.state.layout = self._sample()
+            if not self.state.layout.stations:
+                # Stage 0 has no bars, so there is no height to redraw. Sending
+                # the identical layout anyway would rebuild every worker's
+                # MjModel -- and its GL context -- for nothing.
+                return None
+            self.state.layout = resample_heights(
+                self.rng, self.state.layout, self.split)
             return self.state.layout
 
         return None
