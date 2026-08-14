@@ -98,7 +98,14 @@ def explain_import_failure(exc: Exception) -> None:
     for soname, state in libs.items():
         print(f"    {soname:<22} {state}")
 
-    if libs["libEGL.so.1"] == "MISSING":
+    if (libs["libEGL.so.1"] == "MISSING"
+            and libs["libEGL_nvidia.so.0"] == "loadable"):
+        # The good case: the driver's GL is all there and only libglvnd's
+        # dispatch shim is absent. One package, no driver surgery, no container.
+        print("\n    The NVIDIA driver's EGL is present -- only libglvnd's")
+        print("    dispatch layer is missing. One package fixes it:")
+        print("      sudo apt-get install -y libegl1 libopengl0")
+    elif libs["libEGL.so.1"] == "MISSING":
         print("\n    libEGL is not on this machine. Either:")
         print("      sudo apt-get install -y libegl1 libglvnd0 libgles2 libglx0")
         print("    or, with no root / a driver installed --no-opengl-files,")
