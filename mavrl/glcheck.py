@@ -276,9 +276,21 @@ def tier_context(have_gpu: bool = False) -> dict:
         if have_gpu and "nvidia" not in info["renderer"].lower():
             info["wrong_gpu"] = "1"
             _say(False, "GL is on the NVIDIA GPU",
-                 f"nvidia-smi sees a card but GL answered {info['renderer']!r}"
-                 " -- on Linux/EGL set MUJOCO_GL=egl; a laptop under GLFW is "
-                 "picking the iGPU")
+                 f"nvidia-smi sees a card but GL answered {info['renderer']!r}")
+            # Under EGL the choice of vendor is made entirely by the ICD files,
+            # so a box with the NVIDIA library present and only Mesa's ICD
+            # listed will render in software with nothing to show for it. Under
+            # GLFW the choice is the window system's, and no ICD is involved.
+            if os.environ.get("MUJOCO_GL") == "egl":
+                print("    libglvnd picked a vendor from the ICDs in tier 1. "
+                      "If 10_nvidia.json\n    is missing there, write it:")
+                print("      printf '%s' "
+                      "'{\"file_format_version\":\"1.0.0\",\"ICD\":"
+                      "{\"library_path\":\"libEGL_nvidia.so.0\"}}' \\")
+                print("        > /usr/share/glvnd/egl_vendor.d/10_nvidia.json")
+            else:
+                print("    Not using EGL. On a headless box set MUJOCO_GL=egl; "
+                      "under GLFW a\n    laptop will hand GL to the iGPU.")
     renderer.close()
     return info
 

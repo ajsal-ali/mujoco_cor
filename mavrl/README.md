@@ -132,9 +132,28 @@ infer it. It exits non-zero on software, so it can gate a job script.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `import mujoco` → `'NoneType' object has no attribute 'eglQueryString'` | no `libEGL.so.1` on the box, so PyOpenGL hands MuJoCo `None` | `apt-get install libegl1 libglvnd0 libgles2 libglx0`, or the container |
-| `GL_RENDERER = llvmpipe` | libglvnd never found NVIDIA's EGL, fell through to Mesa | install the driver's `libEGL_nvidia`; check `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` exists |
+| `GL_RENDERER = llvmpipe` | only Mesa's ICD is listed, so libglvnd never reaches NVIDIA's EGL | write `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` (see below) — installing `libegl1` brings `50_mesa.json` with it, and 10 sorts first |
 | context creation fails outright | no EGL device — headless VM with no GPU passthrough, or a container without the GPU | `nvidia-smi` first; if that fails nothing else matters |
 | `GL_FRAMEBUFFER_UNSUPPORTED (0x8CDD)` | NVIDIA surfaceless contexts reject MuJoCo's default 4× multisampled offscreen buffer | already handled — `patch_offscreen_framebuffer` sets `offsamples="0"` |
+
+### Picking the NVIDIA vendor, not Mesa
+
+Under EGL, *which* GL implementation you get is decided entirely by the JSON files in
+`/usr/share/glvnd/egl_vendor.d/`, in filename order. `libEGL_nvidia.so.0` being present on
+the box means nothing if no ICD names it — libglvnd falls to Mesa and renders on the CPU,
+with no error anywhere. Installing `libegl1` makes this *more* likely, because it ships
+`50_mesa.json`.
+
+```bash
+printf '%s' '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \
+    > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+```
+
+`10` sorts before `50`, so NVIDIA wins. To bypass the directory scan entirely — useful when
+you cannot write there — set `__EGL_VENDOR_LIBRARY_FILENAMES` to that file's path.
+
+Measured on an A10: llvmpipe gives ~17 policy steps/s for one env; the same box on the GPU
+is two orders of magnitude past that. `glcheck` fails below 50.
 
 ### No root on the server
 
