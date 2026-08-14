@@ -131,6 +131,7 @@ infer it. It exits non-zero on software, so it can gate a job script.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `import mujoco` → `'NoneType' object has no attribute 'eglQueryString'` | no `libEGL.so.1` on the box, so PyOpenGL hands MuJoCo `None` | `apt-get install libegl1 libglvnd0 libgles2 libglx0`, or the container |
 | `GL_RENDERER = llvmpipe` | libglvnd never found NVIDIA's EGL, fell through to Mesa | install the driver's `libEGL_nvidia`; check `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` exists |
 | context creation fails outright | no EGL device — headless VM with no GPU passthrough, or a container without the GPU | `nvidia-smi` first; if that fails nothing else matters |
 | `GL_FRAMEBUFFER_UNSUPPORTED (0x8CDD)` | NVIDIA surfaceless contexts reject MuJoCo's default 4× multisampled offscreen buffer | already handled — `patch_offscreen_framebuffer` sets `offsamples="0"` |

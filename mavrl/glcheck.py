@@ -61,6 +61,54 @@ def _say(ok: bool, label: str, detail: str = "") -> bool:
     return ok
 
 
+def explain_import_failure(exc: Exception) -> None:
+    """Turn `import mujoco` blowing up under MUJOCO_GL=egl into a diagnosis.
+
+    The signature failure is an AttributeError on None: PyOpenGL could not load
+    libEGL, so it hands MuJoCo `None` and MuJoCo calls a method on it. The
+    traceback names `eglQueryString` and nothing about the actual cause, which
+    is that the GL libraries are not installed -- routinely true on a GPU box,
+    because NVIDIA's own datacenter instructions install the driver with
+    `--no-opengl-files`, giving you CUDA and no EGL.
+    """
+    print("\n  why:")
+    if not sys.platform.startswith("linux"):
+        print(f"    {exc!r}")
+        return
+
+    import ctypes.util
+    found = ctypes.util.find_library("EGL")
+    print(f"    ctypes.util.find_library('EGL') = {found!r}")
+
+    try:
+        import OpenGL
+        print(f"    PyOpenGL                        = {OpenGL.__version__}")
+    except ImportError:
+        print("    PyOpenGL                        = NOT INSTALLED"
+              "   ->  pip install PyOpenGL")
+
+    libs = {}
+    for soname in ("libEGL.so.1", "libGLX.so.0", "libOpenGL.so.0",
+                   "libEGL_nvidia.so.0"):
+        try:
+            ctypes.CDLL(soname)
+            libs[soname] = "loadable"
+        except OSError:
+            libs[soname] = "MISSING"
+    for soname, state in libs.items():
+        print(f"    {soname:<22} {state}")
+
+    if libs["libEGL.so.1"] == "MISSING":
+        print("\n    libEGL is not on this machine. Either:")
+        print("      sudo apt-get install -y libegl1 libglvnd0 libgles2 libglx0")
+        print("    or, with no root / a driver installed --no-opengl-files,")
+        print("    run in the container: docker build -t mavrl -f docker/Dockerfile .")
+    elif libs["libEGL_nvidia.so.0"] == "MISSING":
+        print("\n    libEGL loads but NVIDIA's does not: the driver was "
+              "installed without\n    its GL components. Reinstall it without "
+              "--no-opengl-files, or use the container.")
+
+
 # --------------------------------------------------------------------------
 # tier 1 -- environment
 # --------------------------------------------------------------------------
@@ -77,6 +125,7 @@ def tier_environment() -> bool:
         print(f"  mujoco         = {mujoco.__version__}")
     except Exception as exc:
         _say(False, "import mujoco", repr(exc))
+        explain_import_failure(exc)
         raise SystemExit(2)
 
     smi = shutil.which("nvidia-smi")
