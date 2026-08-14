@@ -136,6 +136,24 @@ infer it. It exits non-zero on software, so it can gate a job script.
 | context creation fails outright | no EGL device — headless VM with no GPU passthrough, or a container without the GPU | `nvidia-smi` first; if that fails nothing else matters |
 | `GL_FRAMEBUFFER_UNSUPPORTED (0x8CDD)` | NVIDIA surfaceless contexts reject MuJoCo's default 4× multisampled offscreen buffer | already handled — `patch_offscreen_framebuffer` sets `offsamples="0"` |
 
+### No root on the server
+
+A GPU box often has the NVIDIA driver's `libEGL_nvidia.so.0` but not libglvnd's `libEGL.so.1`
+— the thin shim that routes an EGL call to the vendor library. `glcheck` names that case
+specifically. With root it is `apt-get install -y libegl1 libopengl0`; without root, the same
+two libraries unpack into `$HOME`:
+
+```bash
+bash scripts/gl_no_root.sh
+source ~/.mavrl_gl_env
+python -m mavrl.glcheck
+```
+
+`apt-get download` and `dpkg-deb -x` are both unprivileged, so this installs nothing
+system-wide and `rm -rf ~/.local/gl` undoes it. The script also makes the unversioned
+`libEGL.so` symlink, which the runtime package omits and which `ctypes.util.find_library` —
+what PyOpenGL calls — needs before it will return anything but `None`.
+
 ### In a container
 
 `docker/Dockerfile` builds a CUDA image with the GL loader and the EGL vendor ICD in place:
