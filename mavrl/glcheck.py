@@ -106,7 +106,7 @@ def explain_import_failure(exc: Exception) -> None:
         print("    dispatch layer is missing. One package fixes it:")
         print("      sudo apt-get install -y libegl1 libopengl0")
         print("    No root? The same two libraries, unpacked into $HOME:")
-        print("      bash scripts/gl_no_root.sh && source ~/.mavrl_gl_env")
+        print("      bash scripts/gl_no_root.sh && . ~/.mavrl_gl_env")
     elif libs["libEGL.so.1"] == "MISSING":
         print("\n    libEGL is not on this machine. Either:")
         print("      sudo apt-get install -y libegl1 libglvnd0 libgles2 libglx0")

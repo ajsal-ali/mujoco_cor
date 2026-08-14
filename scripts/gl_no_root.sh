@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Install libglvnd's EGL dispatch libraries into $HOME. No root, no container.
 #
-#   bash scripts/gl_no_root.sh && source ~/.mavrl_gl_env && python -m mavrl.glcheck
+#   bash scripts/gl_no_root.sh && . ~/.mavrl_gl_env && python -m mavrl.glcheck
+#
+# `.` rather than `source`: the file has to be readable by dash, which is
+# /bin/sh on Debian and Ubuntu and does not have bash's `source` builtin.
 #
 # For the case glcheck reports as "the NVIDIA driver's EGL is present -- only
 # libglvnd's dispatch layer is missing": libEGL_nvidia.so.0 loads fine, but the
@@ -64,8 +67,8 @@ export PYOPENGL_PLATFORM=egl
 EOF
 
 echo
-echo "==> done. Now:"
-echo "      source $ENVFILE"
+echo "==> done. Now, in this same shell:"
+echo "      . $ENVFILE"
 echo "      python -m mavrl.glcheck"
 echo
-echo "    Add 'source $ENVFILE' to ~/.bashrc to make it stick."
+echo "    Add '. $ENVFILE' to ~/.bashrc to make it stick."

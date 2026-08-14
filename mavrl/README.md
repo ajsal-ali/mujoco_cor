@@ -145,7 +145,7 @@ two libraries unpack into `$HOME`:
 
 ```bash
 bash scripts/gl_no_root.sh
-source ~/.mavrl_gl_env
+. ~/.mavrl_gl_env          # `.`, not `source` -- the server's /bin/sh is dash
 python -m mavrl.glcheck
 ```
 
