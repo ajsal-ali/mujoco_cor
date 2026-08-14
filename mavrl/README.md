@@ -103,9 +103,57 @@ Set the GL backend **before** any mujoco import — every script does
 `os.environ.setdefault("MUJOCO_GL", "egl")`, so exporting it first wins:
 
 ```bash
-export MUJOCO_GL=egl      # headless Linux / Modal
+export MUJOCO_GL=egl      # headless Linux server
 export MUJOCO_GL=glfw     # local machine with a display
 ```
+
+## Headless GPU rendering
+
+A server has no monitor, and MuJoCo's default GL backend wants one. `MUJOCO_GL=egl` is the
+answer — EGL creates a **surfaceless** context straight on the GPU, with no X server, no
+display and no `xvfb` in the way. `osmesa` also works headless but rasterizes on the CPU,
+which for this project is not a fallback so much as a way to make a two-day run into a
+two-month one.
+
+Check the box before trusting it with a run:
+
+```bash
+python -m mavrl.glcheck
+```
+
+Four tiers — environment, context, *which* GL implementation answered, then the real
+512² course render, timed. The third tier is the one worth having. A software rasterizer
+does not raise anything; it returns correct frames at 1/50th the rate, so the only symptom
+is a run that never finishes, and `glcheck` names `GL_RENDERER` rather than leaving you to
+infer it. It exits non-zero on software, so it can gate a job script.
+
+**The three things that actually break, in order of how often:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `GL_RENDERER = llvmpipe` | libglvnd never found NVIDIA's EGL, fell through to Mesa | install the driver's `libEGL_nvidia`; check `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` exists |
+| context creation fails outright | no EGL device — headless VM with no GPU passthrough, or a container without the GPU | `nvidia-smi` first; if that fails nothing else matters |
+| `GL_FRAMEBUFFER_UNSUPPORTED (0x8CDD)` | NVIDIA surfaceless contexts reject MuJoCo's default 4× multisampled offscreen buffer | already handled — `patch_offscreen_framebuffer` sets `offsamples="0"` |
+
+### In a container
+
+`docker/Dockerfile` builds a CUDA image with the GL loader and the EGL vendor ICD in place:
+
+```bash
+docker build -t mavrl -f docker/Dockerfile .        # from the repo root
+docker run --rm --gpus all mavrl                    # CMD is glcheck
+docker run --rm --gpus all -v "$PWD/runs:/workspace/runs" mavrl \
+    python3 -m mavrl.train_course --stage 3 --curriculum --n-envs 60
+```
+
+The line that matters is `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics`. The default
+is `compute,utility`, which mounts CUDA and `nvidia-smi` but **not** the GL libraries — so
+`--gpus all` gives a container that trains on the GPU and renders on the CPU, with nothing
+anywhere reporting a problem. Most CUDA Dockerfiles omit it because most CUDA workloads
+never draw anything. This one does, once per env per policy step.
+
+Build from the repo root, not from `docker/`: the context has to include the IMAV arena
+under `Files(3)`, which `course_world.py` refuses to run without.
 
 ## Pipeline
 

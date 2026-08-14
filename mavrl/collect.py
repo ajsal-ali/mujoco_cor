@@ -35,7 +35,7 @@ from typing import Optional
 
 import numpy as np
 
-# os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("MUJOCO_GL", "egl")   # headless GL; export to override
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mavrl import config as C                                    # noqa: E402
