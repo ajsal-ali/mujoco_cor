@@ -413,6 +413,110 @@ def probe_framebuffers() -> None:
           "around.")
 
 
+def _cpu_report() -> None:
+    """Cores, and how many of them this process is actually allowed to use.
+
+    `os.cpu_count()` reports the machine; a notebook runtime or a container is
+    routinely pinned to far fewer, and it is the smaller number that caps how
+    many envs are worth running.
+    """
+    total = os.cpu_count() or 0
+    try:
+        usable = len(os.sched_getaffinity(0))       # linux only
+    except AttributeError:
+        usable = total
+    print(f"  cpu cores      = {usable} usable of {total} visible")
+
+    try:
+        with open("/proc/cpuinfo") as fh:
+            names = [l.split(":", 1)[1].strip() for l in fh
+                     if l.startswith("model name")]
+        if names:
+            print(f"  cpu            = {names[0]}")
+    except OSError:
+        pass
+
+
+def profile_step(reps: int) -> None:
+    """Break one policy step into its stages and give each a peak rate.
+
+    Each stage is timed in isolation and reported as the rate it would sustain
+    if it were the only thing running -- so the slowest number is the ceiling
+    the whole pipeline is pressed against, and the stages are directly
+    comparable. They will not sum exactly to the measured step: the PID cascade,
+    reward and gate bookkeeping are not separately timed, and show up as the
+    unattributed remainder.
+    """
+    import mujoco
+    from mavrl import config as C
+    from mavrl.course_aviary import CourseAviary
+    from mavrl.course_world import sample_layout
+    from mavrl.imageproc import build_observation
+    from mavrl.sensor_noise import corrupt
+
+    print("\n5. where the time goes")
+    _cpu_report()
+
+    env = CourseAviary(layout=sample_layout(np.random.default_rng(0), 3), seed=0)
+    env.reset()
+    action = np.zeros(C.N_ACTIONS, dtype=np.float32)
+    env.step(action)                                # warm-up
+
+    def timed(fn, n):
+        t0 = time.perf_counter()
+        for _ in range(n):
+            fn()
+        return (time.perf_counter() - t0) / n
+
+    def one_step():
+        _, _, term, trunc, _ = env.step(action)
+        if term or trunc:
+            env.reset()
+
+    t_step = timed(one_step, reps)
+    t_render = timed(lambda: env._getDroneImages(0), reps)
+
+    env._render_seg = False
+    t_render_noseg = timed(lambda: env._getDroneImages(0), reps)
+    env._render_seg = True
+
+    rgb, dep, _ = env._getDroneImages(0)
+    rgb = rgb[..., :3]
+    t_corrupt = timed(lambda: corrupt(rgb, dep, env.noise, env._rng), reps)
+    rgb_n, dep_n = corrupt(rgb, dep, env.noise, env._rng)
+    t_down = timed(lambda: build_observation(rgb_n, dep_n, C.IMG_RES), reps)
+    # Raw mj_step, x24, is the physics floor -- it leaves out the PID cascade
+    # that the real inner loop runs on top of it.
+    t_phys = timed(lambda: mujoco.mj_step(env.model, env.data),
+                   reps * 10) * C.SIM_STEPS_PER_POLICY
+    env.close()
+
+    rows = [
+        (f"render x3 passes ({C.RENDER_RES}^2)", t_render),
+        ("  same, seg pass skipped", t_render_noseg),
+        (f"downsample -> {C.IMG_RES}^2", t_down),
+        ("sensor noise", t_corrupt),
+        (f"physics, {C.SIM_STEPS_PER_POLICY} x mj_step", t_phys),
+    ]
+    print(f"\n  {'stage':<34}{'ms':>8}{'peak Hz':>10}{'% of step':>11}")
+    for name, t in rows:
+        print(f"  {name:<34}{t * 1e3:>8.1f}{1.0 / t:>10.0f}"
+              f"{100 * t / t_step:>10.0f}%")
+    attributed = t_render + t_down + t_corrupt + t_phys
+    print(f"  {'unattributed (PID, reward, gates)':<34}"
+          f"{(t_step - attributed) * 1e3:>8.1f}{'':>10}"
+          f"{100 * (t_step - attributed) / t_step:>10.0f}%")
+    print(f"  {'FULL STEP':<34}{t_step * 1e3:>8.1f}{1.0 / t_step:>10.0f}"
+          f"{100:>10}%")
+
+    saved = t_render - t_render_noseg
+    if saved > 0.05 * t_step:
+        print(f"\n  Skipping the segmentation pass saves {saved * 1e3:.1f} ms "
+              f"({100 * saved / t_step:.0f}% of the step).")
+        print("  CourseAviary renders it every step but only *consumes* it "
+              "under\n  collect_mode -- see course_aviary.py:86.")
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -425,10 +529,17 @@ def main(argv=None) -> int:
     p.add_argument("--probe", action="store_true",
                    help="on 0x8CDD: sweep offsamples x resolution and report "
                         "which framebuffer formats this driver will accept")
+    p.add_argument("--profile", action="store_true",
+                   help="GL is on the GPU but throughput is low: break one "
+                        "policy step into stages and rate each")
     args = p.parse_args(argv)
 
     have_gpu = tier_environment()
     tier_egl_devices()
+
+    if args.profile:
+        profile_step(args.steps)
+        return 0
 
     if args.probe:
         # Deliberately instead of, not before, the normal tiers: tier 2 is what
