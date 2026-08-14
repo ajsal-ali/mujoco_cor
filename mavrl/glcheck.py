@@ -278,7 +278,11 @@ def tier_context(have_gpu: bool = False) -> dict:
         # everything below passes, nvidia-smi looks healthy, and the frames come
         # off the wrong chip. Only worth saying when there is an NVIDIA GPU to
         # have missed.
-        if have_gpu and "nvidia" not in info["renderer"].lower():
+        # Match on vendor as well as renderer: NVIDIA's datacenter cards report
+        # a renderer string with no "nvidia" in it at all ("Tesla T4/PCIe/SSE2"),
+        # so testing the renderer alone flags a working GPU as the wrong one.
+        whose = (info["vendor"] + " " + info["renderer"]).lower()
+        if have_gpu and "nvidia" not in whose:
             info["wrong_gpu"] = "1"
             _say(False, "GL is on the NVIDIA GPU",
                  f"nvidia-smi sees a card but GL answered {info['renderer']!r}")
@@ -304,7 +308,7 @@ def tier_context(have_gpu: bool = False) -> dict:
 # tier 4 -- the render this project actually performs
 # --------------------------------------------------------------------------
 
-def tier_course(steps: int) -> float:
+def tier_course(steps: int, hardware: bool = True) -> float:
     """Step the real env, and time it.
 
     Tier 2 proves GL works. This proves it works at 512x512 with the arena
@@ -356,12 +360,16 @@ def tier_course(steps: int) -> float:
         env.close()
 
     print(f"  throughput     = {fps:.0f} policy steps/s, single env")
-    # One policy step renders one frame. Below ~50 steps/s per process the
-    # renderer, not the network, is what the run spends its day waiting on --
-    # and a software rasterizer lands an order of magnitude under that.
+    # One policy step renders one frame. Below ~50 steps/s a single env is slow
+    # enough to be worth explaining -- but the explanation depends on tier 3.
+    # With GL confirmed on hardware the rasterizer is not the suspect: a step
+    # also runs 24 physics ticks and downsamples three 512^2 buffers to 128, all
+    # on the CPU, which is what a 2-vCPU notebook runtime runs out of first.
     _say(fps > 50, "fast enough to train on",
-         f"{fps:.0f} steps/s -- software-rasterizer territory"
-         if fps <= 50 else "")
+         "" if fps > 50 else
+         (f"{fps:.0f} steps/s, but GL is on hardware -- CPU-bound "
+          "(physics + downsample), not the renderer" if hardware else
+          f"{fps:.0f} steps/s -- software-rasterizer territory"))
     return fps
 
 
@@ -429,10 +437,12 @@ def main(argv=None) -> int:
         return 0
 
     info = tier_context(have_gpu)
-    fps = 0.0 if args.skip_course else tier_course(args.steps)
-
-    soft = is_software(info.get("renderer", "")) or (
-        not args.skip_course and 0 < fps <= 50)
+    # Whether GL is software is settled in tier 3, by the renderer string. A low
+    # frame rate is a separate finding: it can equally mean the CPU cannot keep
+    # up, and conflating the two sends you to fix a driver that is already fine.
+    soft = is_software(info.get("renderer", ""))
+    fps = 0.0 if args.skip_course else tier_course(args.steps, not soft)
+    slow = not args.skip_course and 0 < fps <= 50
     good = (args.skip_course or fps > 0) and (args.allow_software or not soft)
 
     doc = "see mavrl/README.md 'Headless GPU rendering'."
@@ -442,6 +452,9 @@ def main(argv=None) -> int:
         verdict = f"RENDERS, BUT IN SOFTWARE -- {doc}"
     elif info.get("wrong_gpu"):
         verdict = f"RENDERS ON THE WRONG GPU -- {doc}"
+    elif slow:
+        verdict = ("RENDERING ON THE GPU, but only "
+                   f"{fps:.0f} steps/s -- the CPU is the bottleneck now.")
     else:
         verdict = "RENDERING ON THE GPU -- go train."
     print("\n" + verdict)
