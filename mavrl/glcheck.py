@@ -43,9 +43,12 @@ SOFTWARE_MARKERS = ("llvmpipe", "softpipe", "swrast", "software rasterizer",
 
 #: A model with nothing in it but a lit box. If this cannot render, nothing can,
 #: and the failure is GL's rather than anything the course XML asked for.
-TRIVIAL_XML = """
+TRIVIAL_TEMPLATE = """
 <mujoco>
-  <visual><global offwidth="64" offheight="64"/><quality offsamples="0"/></visual>
+  <visual>
+    <global offwidth="{w}" offheight="{h}"/>
+    <quality offsamples="{s}"/>
+  </visual>
   <worldbody>
     <light pos="0 0 3"/>
     <geom type="box" size=".5 .5 .5" rgba="1 .3 .1 1"/>
@@ -53,6 +56,8 @@ TRIVIAL_XML = """
   </worldbody>
 </mujoco>
 """
+
+TRIVIAL_XML = TRIVIAL_TEMPLATE.format(w=64, h=64, s=0)
 
 
 def _say(ok: bool, label: str, detail: str = "") -> bool:
@@ -360,6 +365,46 @@ def tier_course(steps: int) -> float:
     return fps
 
 
+def probe_framebuffers() -> None:
+    """Sweep the two knobs that shape MuJoCo's offscreen framebuffer.
+
+    `0x8CDD` is GL_FRAMEBUFFER_UNSUPPORTED -- the driver rejecting the *format*
+    combination, not the size or the scene. MuJoCo exposes only two things that
+    change that combination from XML: `offsamples` (multisampling) and the
+    buffer's dimensions. Sweeping both says whether some corner of the space
+    works, which is the difference between a config to set and a driver to
+    abandon.
+
+    Each attempt runs in a fresh subprocess. A failed `mjr_makeContext` can
+    leave GL state that poisons the next attempt in the same process, which
+    would make the grid lie.
+    """
+    import mujoco                                    # noqa: F401  (fail early)
+    print("\n5. framebuffer probe")
+    print("     samples   64x64   256x256   512x512")
+
+    for samples in (0, 1, 2, 4, 8):
+        row = []
+        for res in (64, 256, 512):
+            code = (
+                "import mujoco;"
+                f"m=mujoco.MjModel.from_xml_string('''"
+                f"{TRIVIAL_TEMPLATE.format(w=res, h=res, s=samples)}''');"
+                f"r=mujoco.Renderer(m,height={res},width={res});"
+                "d=mujoco.MjData(m);mujoco.mj_forward(m,d);"
+                "r.update_scene(d,camera='cam');r.render();print('OK')"
+            )
+            out = subprocess.run([sys.executable, "-c", code],
+                                 capture_output=True, text=True, timeout=120)
+            row.append("  ok  " if "OK" in out.stdout else " fail ")
+        print(f"       {samples:<8}" + "  ".join(row))
+
+    print("\n    All 'fail' with the NVIDIA device selected means the driver "
+          "will not\n    give MuJoCo an offscreen buffer in any configuration "
+          "it can ask for.\n    That is not something this repo can configure "
+          "around.")
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -369,10 +414,20 @@ def main(argv=None) -> int:
                    help="exit 0 even on a software rasterizer")
     p.add_argument("--skip-course", action="store_true",
                    help="stop after tier 3; useful before the assets exist")
+    p.add_argument("--probe", action="store_true",
+                   help="on 0x8CDD: sweep offsamples x resolution and report "
+                        "which framebuffer formats this driver will accept")
     args = p.parse_args(argv)
 
     have_gpu = tier_environment()
     tier_egl_devices()
+
+    if args.probe:
+        # Deliberately instead of, not before, the normal tiers: tier 2 is what
+        # is failing, and it exits the process when it does.
+        probe_framebuffers()
+        return 0
+
     info = tier_context(have_gpu)
     fps = 0.0 if args.skip_course else tier_course(args.steps)
 
