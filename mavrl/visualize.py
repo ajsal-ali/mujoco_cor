@@ -176,6 +176,7 @@ CURVE_PANELS = (
     ("agv", "AGV  [m/s]"),
     ("ep_len", "episode length  [policy steps]"),
     ("gates", "gates cleared  [fraction]"),
+    ("heading_err", "|heading error|  [deg]"),
     ("pg", "policy-gradient loss"),
     ("vf", "value loss"),
     ("ent", "entropy"),
