@@ -88,6 +88,20 @@ K_SMOOTH = 0.01
 K_CENTER = 0.1
 CENTER_BAND = 2.2            # apply the centering term within one station spacing
 
+#: Penalty per policy step on |heading error|, radians, against YAW_DOWN_COURSE.
+#:
+#: Yaw is a real action (a[3], a rate) feeding an integrator with no restoring
+#: term, and absolute heading is *not* in the proprio vector -- gravity in the
+#: body frame is invariant to rotation about z. So without this the policy has
+#: no gradient telling it to hold heading and any constant bias on a[3] just
+#: accumulates. Every scripted pilot pins yaw (collect.py:181, teleop.py:111),
+#: so BC data never shows the drift and only PPO discovers it.
+#:
+#: 0.05 puts a 30 deg error at 0.026/step, on the order of K_TIME -- a nudge,
+#: not a constraint. The paper's own config carries the equivalent term
+#: (`yaw_coeff: -0.003` in mavrloriginal/configs/control/config_new_out.yaml).
+K_YAW = 0.05
+
 R_TOTAL = 150.0              # split evenly across the course's gates
 R_FINISH = 100.0
 R_CRASH = 25.0

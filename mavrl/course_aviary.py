@@ -37,8 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mavrl import config as C                                    # noqa: E402
 from mavrl.course_gates import TRAVEL_SIGN, Outcome              # noqa: E402
 from mavrl.course_world import (                                 # noqa: E402
-    CourseLayout, ENTRY_Y, EXIT_Y, N_SEM_CLASSES, build_geom_class_lut,
-    build_gates, make_course_world_injector, spawn_pose,
+    CourseLayout, ENTRY_Y, EXIT_Y, N_SEM_CLASSES, YAW_DOWN_COURSE,
+    build_geom_class_lut, build_gates, make_course_world_injector, spawn_pose,
 )
 from mavrl.imageproc import build_observation, seg_to_classes    # noqa: E402
 from mavrl.sensor_noise import NoiseConfig, corrupt              # noqa: E402
@@ -83,7 +83,9 @@ class CourseAviary(BaseAviary):
 
         # Render at RENDER_RES; the observation is downsampled from it.
         self.IMG_RES = np.array([C.RENDER_RES, C.RENDER_RES])
-        self._render_seg = True          # we actually consume it now
+        # Only the collector consumes seg (it is the SeVAE head's target); on the
+        # PPO path the pass was rendered and then dropped, ~10% of the step.
+        self._render_seg = collect_mode
 
         self.pid = PIDControl(self)
         self._cache_model_ids()
@@ -239,6 +241,12 @@ class CourseAviary(BaseAviary):
                 return True
         return False
 
+    def heading_error(self) -> float:
+        """Signed yaw error against down-course, wrapped to [-pi, pi]."""
+        yaw = self.rpy[0, 2]
+        return math.atan2(math.sin(YAW_DOWN_COURSE - yaw),
+                          math.cos(YAW_DOWN_COURSE - yaw))
+
     def _refresh_progress_target(self) -> None:
         wp = self.gates.waypoint()
         self._wp = wp
@@ -335,6 +343,9 @@ class CourseAviary(BaseAviary):
             "missed_gates": int(self.missed_gates),
             "n_stations": int(self.layout.n_stations),
             "agv": float(self._agv()),
+            # Degrees, signed. Worth logging: if this trends away from 0 across
+            # training, K_YAW is too small to hold heading.
+            "heading_err": float(math.degrees(self.heading_error())),
         }
 
     def _agv(self) -> float:
@@ -369,6 +380,10 @@ class CourseAviary(BaseAviary):
         total_reward -= C.K_TIME
         total_reward -= C.K_SMOOTH * float(
             np.linalg.norm(self.cur_action - self.prev_action))
+        # Hold heading down-course. Applied here, once per policy step, rather
+        # than in _computeReward, which runs CTRL_PER_POLICY times -- otherwise
+        # K_YAW would silently be six times what it says.
+        total_reward -= C.K_YAW * abs(self.heading_error())
         self.prev_action = self.cur_action.copy()
 
         info = self._computeInfo()
