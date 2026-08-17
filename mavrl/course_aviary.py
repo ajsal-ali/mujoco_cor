@@ -261,7 +261,14 @@ class CourseAviary(BaseAviary):
 
         if self._wp is not None:
             d = float(np.linalg.norm(pos - self._wp))
-            reward += C.K_PROG * (self.d_prev - d)
+            # Closing pays only up to V_PROG_CAP; past that the credit is flat,
+            # so mid-course speed stops being worth anything on its own and the
+            # remaining incentive to hurry is the (uncapped) completion bonus.
+            # min() and not clip(): moving AWAY still costs the full distance,
+            # otherwise a sawtooth of dash-and-retreat would farm the cap.
+            closed = self.d_prev - d
+            reward += C.K_PROG * min(closed,
+                                     C.V_PROG_CAP * self.CTRL_TIMESTEP)
             self.d_prev = d
 
             if abs(pos[1] - self.gates.current.y) < C.CENTER_BAND:  # signless

@@ -85,6 +85,21 @@ N_ACTIONS = 4
 K_PROG = 1.0
 K_TIME = 0.03
 K_SMOOTH = 0.01
+
+#: Speed above which closing on the waypoint stops paying, in the SAME units as
+#: the logged `agv` (SDF units/s; the arena is the course x2.2, so 1.3 here is
+#: ~0.59 competition m/s). Below the cap the progress term is the usual
+#: distance-made-good; above it the per-tick credit is clipped flat.
+#:
+#: The point is to move the speed incentive to where it belongs. Racing between
+#: gates buys nothing and costs control margin on the next bar, so mid-course
+#: speed is worth exactly one thing -- arriving. The completion bonus
+#: (K_TBONUS, below) stays uncapped, so a *finished* course still pays for
+#: every second saved, with no ceiling.
+#:
+#: Retreating is deliberately NOT clipped: backing away from the waypoint costs
+#: the full distance, so the cap cannot be farmed by oscillating.
+V_PROG_CAP = 1.3
 K_CENTER = 0.1
 CENTER_BAND = 2.2            # apply the centering term within one station spacing
 
@@ -97,14 +112,29 @@ CENTER_BAND = 2.2            # apply the centering term within one station spaci
 #: accumulates. Every scripted pilot pins yaw (collect.py:181, teleop.py:111),
 #: so BC data never shows the drift and only PPO discovers it.
 #:
-#: 0.05 puts a 30 deg error at 0.026/step, on the order of K_TIME -- a nudge,
-#: not a constraint. The paper's own config carries the equivalent term
-#: (`yaw_coeff: -0.003` in mavrloriginal/configs/control/config_new_out.yaml).
-K_YAW = 0.05
+#: 0.1 puts a 30 deg error at 0.052/step, ~1.7x K_TIME, and a 90 deg error at
+#: 0.157/step -- roughly half a second of the time penalty, every step it is
+#: held. Firm enough that sustained drift is never worth it, still far short of
+#: a hard lock: a brief yaw excursion to line up a bar costs well under one
+#: gate. The paper's own config carries the equivalent term (`yaw_coeff:
+#: -0.003` in mavrloriginal/configs/control/config_new_out.yaml).
+K_YAW = 0.1
 
 R_TOTAL = 150.0              # split evenly across the course's gates
 R_FINISH = 100.0
-R_CRASH = 25.0
+
+#: Must stay ABOVE the per-gate payout, which is R_TOTAL / n_gates -- 30.0 at
+#: stage 3 (5 gates), 37.5 at stage 2, 50.0 at stage 1. At the old 25.0 the
+#: arithmetic said to gamble: attempting a marginal gate and crashing scored
+#: +5 against stopping safely, so "try it and die" beat "hold position", and
+#: the terminal-reason mix filled up with `collision`. At 40.0 a failed attempt
+#: costs more than the gate it was reaching for at stage 3, without being so
+#: steep that the policy learns to sit still -- hovering to timeout is ~-11.7,
+#: so one gate then a crash (-10) is still roughly break-even against doing
+#: nothing, and two gates then a crash is clearly better. Watch the
+#: terminal-reason mix: `collision` dominating means raise it, `timeout`
+#: dominating means it is already too high.
+R_CRASH = 40.0
 K_TBONUS = 5.0
 
 #: Terminate past the entry wall if |x| exceeds this. The red bar spans
