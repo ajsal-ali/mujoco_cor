@@ -37,8 +37,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mavrl import config as C                                    # noqa: E402
 from mavrl.course_gates import TRAVEL_SIGN, Outcome              # noqa: E402
 from mavrl.course_world import (                                 # noqa: E402
-    CourseLayout, ENTRY_Y, EXIT_Y, N_SEM_CLASSES, build_geom_class_lut,
-    build_gates, make_course_world_injector, spawn_pose,
+    CourseLayout, ENTRY_Y, EXIT_Y, N_SEM_CLASSES, YAW_DOWN_COURSE,
+    build_geom_class_lut, build_gates, make_course_world_injector, spawn_pose,
 )
 from mavrl.imageproc import build_observation, seg_to_classes    # noqa: E402
 from mavrl.sensor_noise import NoiseConfig, corrupt              # noqa: E402
@@ -83,7 +83,9 @@ class CourseAviary(BaseAviary):
 
         # Render at RENDER_RES; the observation is downsampled from it.
         self.IMG_RES = np.array([C.RENDER_RES, C.RENDER_RES])
-        self._render_seg = True          # we actually consume it now
+        # Only the collector consumes seg (it is the SeVAE head's target); on the
+        # PPO path the pass was rendered and then dropped, ~10% of the step.
+        self._render_seg = collect_mode
 
         self.pid = PIDControl(self)
         self._cache_model_ids()
@@ -239,6 +241,12 @@ class CourseAviary(BaseAviary):
                 return True
         return False
 
+    def heading_error(self) -> float:
+        """Signed yaw error against down-course, wrapped to [-pi, pi]."""
+        yaw = self.rpy[0, 2]
+        return math.atan2(math.sin(YAW_DOWN_COURSE - yaw),
+                          math.cos(YAW_DOWN_COURSE - yaw))
+
     def _refresh_progress_target(self) -> None:
         wp = self.gates.waypoint()
         self._wp = wp
@@ -253,7 +261,14 @@ class CourseAviary(BaseAviary):
 
         if self._wp is not None:
             d = float(np.linalg.norm(pos - self._wp))
-            reward += C.K_PROG * (self.d_prev - d)
+            # Closing pays only up to V_PROG_CAP; past that the credit is flat,
+            # so mid-course speed stops being worth anything on its own and the
+            # remaining incentive to hurry is the (uncapped) completion bonus.
+            # min() and not clip(): moving AWAY still costs the full distance,
+            # otherwise a sawtooth of dash-and-retreat would farm the cap.
+            closed = self.d_prev - d
+            reward += C.K_PROG * min(closed,
+                                     C.V_PROG_CAP * self.CTRL_TIMESTEP)
             self.d_prev = d
 
             if abs(pos[1] - self.gates.current.y) < C.CENTER_BAND:  # signless
@@ -300,10 +315,18 @@ class CourseAviary(BaseAviary):
                 # here rather than with geometry so the obstacle set stays
                 # exactly the competition's.
                 crash, reason = True, "out_of_corridor"
-            elif (abs(pos[0]) > 7.5 or pos[2] > 7.0
-                  # more than 4 past the exit, or 6 back behind the entry
-                  or TRAVEL_SIGN * (pos[1] - EXIT_Y) > 4.0
-                  or TRAVEL_SIGN * (pos[1] - ENTRY_Y) < -6.0):
+            elif abs(pos[0]) > 7.5:
+                # Also sideways, but from before the entry wall, where
+                # CORRIDOR_X_LIMIT does not apply yet. Same offence.
+                crash, reason = True, "out_of_corridor"
+            elif TRAVEL_SIGN * (pos[1] - ENTRY_Y) < -6.0:
+                crash, reason = True, "backwards"
+            elif pos[2] > 7.0 or TRAVEL_SIGN * (pos[1] - EXIT_Y) > 4.0:
+                # Overshoot: ran on more than 4 past the exit, or climbed out
+                # of the room. Split from the two above because it is a
+                # different failure -- the drone got all the way down the
+                # course to do this, so it is priced as a crash, not as
+                # straying.
                 crash, reason = True, "out_of_bounds"
 
         if crash:
@@ -313,7 +336,13 @@ class CourseAviary(BaseAviary):
             else:
                 self._crashed = True
                 self._terminal_reason = reason
-                reward -= C.R_CRASH
+                # Going out the side or backwards costs more than hitting
+                # something. Both end the episode, so without the split the
+                # policy picks whichever exit is easier to reach, and sideways
+                # is always easier than committing to a gate. Overshooting the
+                # exit is not in that set -- see C.STRAY_REASONS.
+                reward -= (C.R_STRAY if reason in C.STRAY_REASONS
+                           else C.R_CRASH)
 
         self.prev_pos = pos.copy()
         return float(reward)
@@ -335,6 +364,9 @@ class CourseAviary(BaseAviary):
             "missed_gates": int(self.missed_gates),
             "n_stations": int(self.layout.n_stations),
             "agv": float(self._agv()),
+            # Degrees, signed. Worth logging: if this trends away from 0 across
+            # training, K_YAW is too small to hold heading.
+            "heading_err": float(math.degrees(self.heading_error())),
         }
 
     def _agv(self) -> float:
@@ -369,6 +401,20 @@ class CourseAviary(BaseAviary):
         total_reward -= C.K_TIME
         total_reward -= C.K_SMOOTH * float(
             np.linalg.norm(self.cur_action - self.prev_action))
+        # Hold heading down-course. Applied here, once per policy step, rather
+        # than in _computeReward, which runs CTRL_PER_POLICY times -- otherwise
+        # K_YAW would silently be six times what it says.
+        total_reward -= C.K_YAW * abs(self.heading_error())
+        # Speed band: free up to V_PROG_CAP (which is where progress credit
+        # stops accruing), unpaid but unpunished to V_SPEED_LIMIT, penalised
+        # above it. Horizontal only -- the vertical axis has to stay free for
+        # the climbs the station spacing forces. Suppressed once the course is
+        # finished, so the uncapped completion bonus is never clawed back from
+        # a run that was fast *and* made it.
+        if not self._success:
+            v_horiz = float(np.linalg.norm(self.vel[0][:2]))
+            total_reward -= C.K_OVERSPEED * max(
+                0.0, v_horiz - C.V_SPEED_LIMIT)
         self.prev_action = self.cur_action.copy()
 
         info = self._computeInfo()

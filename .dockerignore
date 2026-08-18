@@ -1,0 +1,21 @@
+# The build context is sent to the daemon in full, and this repo carries
+# gigabytes of run output that the image has no use for. "Files(3)" is NOT in
+# here -- that is the IMAV arena, and course_world.py refuses to build without it.
+.git
+__pycache__
+**/__pycache__
+*.pyc
+*.egg-info
+
+runs
+ckpt
+data
+data_manual
+samples
+sample
+demo_gifs
+demos.npz
+notebooks
+*.npz
+*.mp4
+*.gif

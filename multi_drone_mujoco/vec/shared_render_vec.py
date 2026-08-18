@@ -121,6 +121,19 @@ def _worker(remote, parent_remote, env_fns_wrapper, want_seg: bool,
                 pass
         return
 
+    def _resync() -> None:
+        """Re-adopt the group's model if a command rebuilt it.
+
+        Envs whose world can be swapped at runtime (``set_layout``) compile a new
+        MjModel each time; object identity is the cheapest reliable signal that
+        it happened. Re-asserting compatibility here also catches a half-applied
+        swap, where only some envs in the group took the new geometry.
+        """
+        if renderer is not None and envs[0].model is not renderer.model:
+            renderer.rebind(envs[0].model)
+            for e in envs:
+                renderer.assert_compatible(e.model, "drone0_cam")
+
     try:
         while True:
             try:
@@ -146,6 +159,7 @@ def _worker(remote, parent_remote, env_fns_wrapper, want_seg: bool,
                 for env, (seed, options) in zip(envs, data):
                     obs, reset_info = env.reset(seed=seed, options=options)
                     out.append((obs, reset_info))
+                _resync()          # reset options may carry new geometry
                 remote.send(("ok", out))
 
             elif cmd == "render":
@@ -172,7 +186,9 @@ def _worker(remote, parent_remote, env_fns_wrapper, want_seg: bool,
 
             elif cmd == "env_method":
                 name, args, kwargs = data
-                remote.send(("ok", [getattr(env, name)(*args, **kwargs) for env in envs]))
+                out = [getattr(env, name)(*args, **kwargs) for env in envs]
+                _resync()          # the method may have rebuilt the world
+                remote.send(("ok", out))
 
             elif cmd == "is_wrapped":
                 from stable_baselines3.common import env_util
@@ -219,6 +235,11 @@ class SharedRenderVecEnv(VecEnv):
         and it costs a full extra pass.
     start_method : str, optional
         Defaults to forkserver where available, else spawn (matching SB3).
+
+    Envs whose world can be rebuilt at runtime must be swapped through
+    ``env_method``: the worker re-adopts the new model right after the call, and
+    before anything is rendered against it. A swap smuggled in through reset
+    ``options`` renders its first frame against the outgoing model.
     """
 
     def __init__(self, env_fns: List[Callable[[], gym.Env]], n_workers: int,

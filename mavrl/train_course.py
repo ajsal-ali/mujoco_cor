@@ -21,13 +21,13 @@ import argparse
 import json
 import os
 import sys
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 
 import numpy as np
 import torch
 
-# os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("MUJOCO_GL", "egl")   # headless GL; export to override
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mavrl import config as C                                    # noqa: E402
@@ -80,6 +80,11 @@ def main(argv=None) -> int:
     p.add_argument("--stage", type=int, default=None,
                    help="fix the curriculum stage (no advancement)")
     p.add_argument("--curriculum", action="store_true")
+    p.add_argument("--split", default="train", choices=("train", "eval", "all"),
+                   help="which bar heights to train on. 'train' holds red "
+                        "3.520 / blue 1.760 back so evaluate.py can ask whether "
+                        "the colour rule generalized; 'all' trains on all three "
+                        "per colour and gives that up")
     p.add_argument("--frozen-encoder", action="store_true")
     p.add_argument("--init", type=Path, default=None)
     p.add_argument("--critic-warmup", type=int, default=30_000)
@@ -93,6 +98,12 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--no-subproc", action="store_true")
+    p.add_argument("--render-workers", type=int, default=None,
+                   help="M: processes sharing one GL context each "
+                        "(default ceil(n_envs/4)). This is the VRAM knob for "
+                        "rendering, as --envs-per-batch is for the backward pass")
+    p.add_argument("--no-shared-render", action="store_true",
+                   help="one GL context per env (SubprocVecEnv), the old path")
     p.add_argument("--plot-every", type=int, default=10,
                    help="rollouts between redraws of curves.png; 0 = only at the end")
     p.add_argument("--plot-smooth", type=int, default=15,
@@ -107,10 +118,15 @@ def main(argv=None) -> int:
              if args.sensor_noise > 0 else NoiseConfig.disabled())
 
     start_stage = args.stage if args.stage is not None else 0
-    sampler = CourseSampler(seed=args.seed, split="train",
+    sampler = CourseSampler(seed=args.seed, split=args.split,
                             start_stage=start_stage)
     venv = build_venv(sampler.layout, args.n_envs, args.seed, noise,
-                      subproc=not args.no_subproc)
+                      subproc=not args.no_subproc,
+                      shared_render=not args.no_shared_render,
+                      render_workers=args.render_workers)
+    print(f"{args.n_envs} envs over "
+          f"{getattr(venv, 'n_workers', args.n_envs)} render context(s)",
+          flush=True)
 
     # "none" is the no-memory ablation: an LSTM with a 1-step window would still
     # be recurrent, so instead we keep the LSTM module but zero its state every
@@ -139,7 +155,8 @@ def main(argv=None) -> int:
     # 200 episodes is ~25 rollouts at 8 envs: long enough that the success rate
     # is not quantized into eighths, short enough to still move within a stage.
     recent = {k: deque(maxlen=200)
-              for k in ("success", "return", "agv", "ep_len", "gates")}
+              for k in ("success", "return", "agv", "ep_len", "gates",
+                        "heading_err")}
 
     def draw_curves() -> None:
         """A broken plot must never take down a run that is otherwise fine."""
@@ -160,7 +177,17 @@ def main(argv=None) -> int:
             # sits at zero while the policy is in fact learning gate 1 of 3.
             n_gates = max(1, int(info.get("n_gates", 1)))
             recent["gates"].append(float(info.get("gates_cleared", 0)) / n_gates)
+            # abs: the signed error averages to ~0 across episodes that drift
+            # both ways, which would read as "no drift" when there is plenty.
+            recent["heading_err"].append(
+                abs(float(info.get("heading_err", 0.0))))
         sampler.record_episodes(infos)
+
+        # Why the episode ended, counted over this rollout. Success rate says
+        # how often it worked; this says how it failed, which is the difference
+        # between "raise R_CRASH" and "the policy is too cautious".
+        reasons = Counter(info.get("terminal_reason") or "timeout"
+                          for info in infos)
 
         if warmup.maybe_release(algo.num_timesteps):
             algo.optimizer = torch.optim.Adam(
@@ -173,16 +200,20 @@ def main(argv=None) -> int:
             "stage": sampler.stage,
             "episodes": len(infos),
             **{k: float(np.mean(v)) if v else 0.0 for k, v in recent.items()},
+            "reasons": dict(reasons),
             **stats,
         }
         with log_path.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
 
         if rollout % 5 == 0:
+            top = " ".join(f"{k}={n}" for k, n in reasons.most_common(3))
             print(f"[{algo.num_timesteps:>9}] {sampler.describe()} "
                   f"ret={row['return']:+.2f} agv={row['agv']:.2f} "
+                  f"yaw={row['heading_err']:.0f}deg "
                   f"pg={stats['pg']:+.4f} "
-                  f"vf={stats['vf']:.4f} kl={stats['kl']:.4f}", flush=True)
+                  f"vf={stats['vf']:.4f} kl={stats['kl']:.4f}\n"
+                  f"{'':>11} why: {top}", flush=True)
 
         if args.plot_every and rollout % args.plot_every == 0:
             draw_curves()

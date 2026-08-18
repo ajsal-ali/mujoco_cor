@@ -103,9 +103,95 @@ Set the GL backend **before** any mujoco import — every script does
 `os.environ.setdefault("MUJOCO_GL", "egl")`, so exporting it first wins:
 
 ```bash
-export MUJOCO_GL=egl      # headless Linux / Modal
+export MUJOCO_GL=egl      # headless Linux server
 export MUJOCO_GL=glfw     # local machine with a display
 ```
+
+## Headless GPU rendering
+
+A server has no monitor, and MuJoCo's default GL backend wants one. `MUJOCO_GL=egl` is the
+answer — EGL creates a **surfaceless** context straight on the GPU, with no X server, no
+display and no `xvfb` in the way. `osmesa` also works headless but rasterizes on the CPU,
+which for this project is not a fallback so much as a way to make a two-day run into a
+two-month one.
+
+Check the box before trusting it with a run:
+
+```bash
+python -m mavrl.glcheck
+```
+
+Four tiers — environment, context, *which* GL implementation answered, then the real
+512² course render, timed. The third tier is the one worth having. A software rasterizer
+does not raise anything; it returns correct frames at 1/50th the rate, so the only symptom
+is a run that never finishes, and `glcheck` names `GL_RENDERER` rather than leaving you to
+infer it. It exits non-zero on software, so it can gate a job script.
+
+**The three things that actually break, in order of how often:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `import mujoco` → `'NoneType' object has no attribute 'eglQueryString'` | no `libEGL.so.1` on the box, so PyOpenGL hands MuJoCo `None` | `apt-get install libegl1 libglvnd0 libgles2 libglx0`, or the container |
+| `GL_RENDERER = llvmpipe` | only Mesa's ICD is listed, so libglvnd never reaches NVIDIA's EGL | write `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` (see below) — installing `libegl1` brings `50_mesa.json` with it, and 10 sorts first |
+| context creation fails outright | no EGL device — headless VM with no GPU passthrough, or a container without the GPU | `nvidia-smi` first; if that fails nothing else matters |
+| `GL_FRAMEBUFFER_UNSUPPORTED (0x8CDD)` | NVIDIA surfaceless contexts reject MuJoCo's default 4× multisampled offscreen buffer | already handled — `patch_offscreen_framebuffer` sets `offsamples="0"` |
+
+### Picking the NVIDIA vendor, not Mesa
+
+Under EGL, *which* GL implementation you get is decided entirely by the JSON files in
+`/usr/share/glvnd/egl_vendor.d/`, in filename order. `libEGL_nvidia.so.0` being present on
+the box means nothing if no ICD names it — libglvnd falls to Mesa and renders on the CPU,
+with no error anywhere. Installing `libegl1` makes this *more* likely, because it ships
+`50_mesa.json`.
+
+```bash
+printf '%s' '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \
+    > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
+```
+
+`10` sorts before `50`, so NVIDIA wins. To bypass the directory scan entirely — useful when
+you cannot write there — set `__EGL_VENDOR_LIBRARY_FILENAMES` to that file's path.
+
+Measured on an A10: llvmpipe gives ~17 policy steps/s for one env; the same box on the GPU
+is two orders of magnitude past that. `glcheck` fails below 50.
+
+### No root on the server
+
+A GPU box often has the NVIDIA driver's `libEGL_nvidia.so.0` but not libglvnd's `libEGL.so.1`
+— the thin shim that routes an EGL call to the vendor library. `glcheck` names that case
+specifically. With root it is `apt-get install -y libegl1 libopengl0`; without root, the same
+two libraries unpack into `$HOME`:
+
+```bash
+bash scripts/gl_no_root.sh
+. ~/.mavrl_gl_env          # `.`, not `source` -- the server's /bin/sh is dash
+python -m mavrl.glcheck
+```
+
+`apt-get download` and `dpkg-deb -x` are both unprivileged, so this installs nothing
+system-wide and `rm -rf ~/.local/gl` undoes it. The script also makes the unversioned
+`libEGL.so` symlink, which the runtime package omits and which `ctypes.util.find_library` —
+what PyOpenGL calls — needs before it will return anything but `None`.
+
+### In a container
+
+`docker/Dockerfile` builds a CUDA image with the GL loader and the EGL vendor ICD in place:
+
+```bash
+docker build -t mavrl -f docker/Dockerfile .        # from the repo root
+docker run --rm --gpus all mavrl                    # CMD is glcheck
+docker run --rm --gpus all -v "$PWD/runs:/workspace/runs" mavrl \
+    python3 -m mavrl.train_course --stage 3 --curriculum --n-envs 60
+```
+
+The line that matters is `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics`. The default
+is `compute,utility`, which mounts CUDA and `nvidia-smi` but **not** the GL libraries — so
+`--gpus all` gives a container that trains on the GPU and renders on the CPU, with nothing
+anywhere reporting a problem. Most CUDA Dockerfiles omit it because most CUDA workloads
+never draw anything. This one does, once per env per policy step.
+
+Build from the repo root, not from `docker/`: the context has to include the IMAV arena
+under `Files(3)`, which `course_world.py` refuses to run without.
 
 ## Pipeline
 
@@ -318,11 +404,60 @@ All parallel envs share one layout at a time; the curriculum broadcasts a new on
 **rollout boundary** via `venv.env_method("set_layout", …)`. Switching mid-rollout would
 invalidate value estimates already collected against the old geometry.
 
+That one-layout rule is also what makes **shared rendering** legal, and `build_venv` uses it by
+default: N envs run in M = `ceil(N/4)` processes, each holding a single GL context and a single
+copy of the arena, instead of one context and one copy per env. Rasterisation work is unchanged
+— still N frames per vec step — but VRAM scales with M, which is what lets `--n-envs` grow past
+the point where the card fills up at 20 % utilisation. Tune it with `--render-workers`, or fall
+back to one context per env with `--no-shared-render` when a rendering bug is suspected.
+Segmentation is not rendered on this path: the training env never runs `collect_mode`, so that
+pass was a full render per frame thrown away.
+
+A layout swap compiles a new `MjModel` per env, so the shared renderer re-adopts it
+(`SharedStaticRenderer.rebind`) immediately after `set_layout` returns and re-asserts that every
+env in the group took the same geometry. Without that it would keep rasterising the *previous*
+course — wrong pixels, no error.
+
 Stations sit on the SDF's own planes, in travel order (y = −9.90 / −7.70 / −5.50, 2.20 apart); red bars at
 2.640 / 3.520 / 4.356, blue at 0.880 / 1.760 / 2.640; spawn 2.20 before the entry wall,
 centred on the red opening so the target is the first thing the camera sees. Advancement is on
 a rolling 200-episode success rate above 80 %, with a forced advance after 400 rollouts so a
 stalled stage cannot deadlock the run.
+
+Within a stage **only the bar heights are redrawn**, every 50 rollouts; station count and colour
+order change when the stage does and not otherwise. Heights come from `--split`: the default
+`train` holds red 3.520 and blue 1.760 back so `evaluate.py` can ask whether the colour rule
+generalized, and `--split all` trains on all three per colour, which gives that question up.
+
+### Pinning one stage
+
+`--stage N` starts there, and stage 3 is `max_stage`, so the advancement branch can never fire
+— the run stays on the full course. Keep `--curriculum` anyway: it is the only thing that calls
+`broadcast_layout`, so without it the heights never get redrawn either and the policy trains
+against one frozen course for the entire run.
+
+```bash
+python -m mavrl.train_course --stage 3 --curriculum --split all \
+    --init runs/course/final.pt --memory-type attention --mem-tokens 4 \
+    --frozen-encoder --n-envs 60 --envs-per-batch 8 --n-steps 64 --out runs/stage3
+```
+
+`--init` takes a PPO checkpoint as readily as `bc_init.pt` — `RecurrentPPO.save` writes the same
+`"policy"` key. Leave `--critic-warmup` at its default when jumping stages: `R_TOTAL` is split
+across gates, so per-gate credit drops from 75 at stage 0 to 30 at stage 3 and the value head
+arrives calibrated to the wrong scale even though the actor does not.
+
+That same split is why **stage 3 returns are lower by construction** and not a symptom: five
+gates instead of two, longer episodes, more accumulated `K_TIME`. Read the `gates` panel in
+`curves.png` instead — it is the fraction cleared, so it compares across stages in a way raw
+return does not. Gates climbing while return is flat is a run that is working.
+
+The trap in a pinned stage is that colour order is drawn **once**, at `CourseSampler`
+construction, from `--seed`, and never redrawn — nothing advances the stage. With only heights
+varying, red→blue→red is a fixed sequence the policy can fly as *up, down, up* without ever
+reading colour, which looks like success until the arrangement changes. Check it with
+`evaluate.py` on a different colour order before believing a stage-3 success rate; if it
+collapses there, rotate `--seed` across runs.
 
 **Consecutive stations are only 2.20 apart**, so a blue bar at 0.880 followed by a red at
 4.356 is a 3.5-unit swing inside one spacing. That is not flyable at full forward speed —

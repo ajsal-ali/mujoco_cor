@@ -63,9 +63,19 @@ class ShardWriter:
         self.ep_len: List[int] = []
         self.ep_layout: List[str] = []
         self.ep_source: List[str] = []
+        self.ep_success: List[bool] = []
 
     def add_episode(self, frames: dict, layout_desc: str,
-                    source: str = "scripted") -> None:
+                    source: str = "scripted", success: bool = True) -> None:
+        """`success` is whether the pilot actually flew the whole course.
+
+        It has to be stored, not just printed, because the collector
+        deliberately keeps flying after a missed gate (see the module docstring)
+        so the SeVAE gets failure frames. That makes every shard a mix of clean
+        traversals and botched ones, and BC has no way to tell them apart
+        without this flag -- it would clone the crashes as readily as the
+        good runs.
+        """
         n = len(frames["image"])
         if n == 0:
             return
@@ -74,6 +84,7 @@ class ShardWriter:
         self.ep_len.append(n)
         self.ep_layout.append(layout_desc)
         self.ep_source.append(source)
+        self.ep_success.append(bool(success))
         if len(self.ep_len) >= self.episodes_per_shard:
             self.flush()
 
@@ -88,6 +99,7 @@ class ShardWriter:
             ep_start=ep_start, ep_len=ep_len,
             ep_layout=np.asarray(self.ep_layout, dtype="<U64"),
             ep_source=np.asarray(self.ep_source, dtype="<U16"),
+            ep_success=np.asarray(self.ep_success, dtype=bool),
             **{k: np.concatenate(v, axis=0) for k, v in self.buf.items()})
         self.shard_idx += 1
         self._reset()
@@ -114,7 +126,8 @@ class SequenceDataset:
     def __init__(self, root, seq_len: int = 32,
                  keys: Optional[Sequence[str]] = None, stride: int = 4,
                  split: Optional[str] = None, val_frac: float = 0.2,
-                 split_seed: int = 0, stratify_by_layout: bool = True):
+                 split_seed: int = 0, stratify_by_layout: bool = True,
+                 only_success: bool = False):
         self.root = Path(root)
         self.shards = sorted(self.root.glob("*.npz"))
         if not self.shards:
@@ -124,6 +137,8 @@ class SequenceDataset:
         self.seq_len = seq_len
         self.stride = max(1, stride)
         self.split = split
+        self.only_success = only_success
+        self.n_dropped = 0
         self.keys = tuple(keys) if keys else (
             "image", "image_gt", "seg", "depth_m", "proprio", "action")
         self.episodes = self._select_episodes(
@@ -133,24 +148,41 @@ class SequenceDataset:
     # -- episode-level bookkeeping -------------------------------------------
 
     def _read_headers(self):
-        """(ep_start, ep_len, ep_layout, n_frames) per shard, headers only."""
+        """(ep_start, ep_len, ep_layout, n_frames, ep_success) per shard."""
         headers = []
         for path in self.shards:
             with np.load(path) as z:
+                n_eps = len(z["ep_len"])
                 layout = (z["ep_layout"].tolist() if "ep_layout" in z.files
-                          else [""] * len(z["ep_len"]))
+                          else [""] * n_eps)
+                # Shards written before ep_success existed cannot be filtered.
+                # Marking them all True keeps them usable rather than silently
+                # dropping the whole set; only_success reports the shortfall.
+                success = (z["ep_success"].astype(bool) if "ep_success" in z.files
+                           else np.ones(n_eps, dtype=bool))
                 headers.append((z["ep_start"].astype(np.int64),
                                 z["ep_len"].astype(np.int64),
                                 layout,
-                                int(len(z["image"]))))
+                                int(len(z["image"])),
+                                success))
         return headers
 
     def _select_episodes(self, split, val_frac, seed, stratify):
         """List of (shard_idx, ep_idx) kept by this view."""
         self._headers = self._read_headers()
         all_eps = [(si, ei)
-                   for si, (_, ep_len, _, _) in enumerate(self._headers)
+                   for si, (_, ep_len, _, _, _) in enumerate(self._headers)
                    for ei in range(len(ep_len))]
+        if self.only_success:
+            n_before = len(all_eps)
+            all_eps = [(si, ei) for si, ei in all_eps
+                       if bool(self._headers[si][4][ei])]
+            if not all_eps:
+                raise ValueError(
+                    f"only_success=True kept 0 of {n_before} episodes under "
+                    f"{self.root}. Either the pilot never completed a course "
+                    f"or these shards predate ep_success -- recollect.")
+            self.n_dropped = n_before - len(all_eps)
         if split is None:
             return all_eps
         if not 0.0 < val_frac < 1.0:
@@ -206,7 +238,7 @@ class SequenceDataset:
         """Per-shard window lists for the episodes this view kept."""
         windows = [[] for _ in self.shards]
         for si, ei in self.episodes:
-            ep_start, ep_len, _, n_frames = self._headers[si]
+            ep_start, ep_len, _, n_frames, _ = self._headers[si]
             windows[si].extend(self._shard_windows(
                 ep_start[ei:ei + 1], ep_len[ei:ei + 1], n_frames, ep_ids=(ei,)))
         return windows
@@ -279,7 +311,7 @@ def summarize(root) -> dict:
     """Shape/consistency report -- the assertions the notebook runs after collect."""
     root = Path(root)
     shards = sorted(root.glob("*.npz"))
-    total_frames = total_eps = 0
+    total_frames = total_eps = total_ok = 0
     layouts, bad = [], []
     by_source: dict = {}
     for path in shards:
@@ -299,6 +331,17 @@ def summarize(root) -> dict:
                    else ["scripted"] * len(ep_len))
             for s_, ln in zip(src, ep_len):
                 by_source[s_] = by_source.get(s_, 0) + int(ln)
+            if "ep_success" in z.files:
+                total_ok += int(z["ep_success"].astype(bool).sum())
+    # The completion rate is the one number that says whether the pilot is
+    # worth cloning at all, and it used to be printed by collect.py and thrown
+    # away. BC trains on this subset, so a low rate here caps everything
+    # downstream -- it belongs in the report, not in a scrollback buffer.
+    if total_eps and total_ok == 0:
+        bad.append("no episode is marked ep_success: either the pilot never "
+                   "completed a course, or these shards predate the flag")
     return {"shards": len(shards), "frames": total_frames, "episodes": total_eps,
+            "completed": total_ok,
+            "completed_frac": round(total_ok / max(1, total_eps), 3),
             "unique_layouts": len(set(layouts)), "frames_by_source": by_source,
             "problems": bad}

@@ -126,6 +126,22 @@ class SharedStaticRenderer:
                 f"shared model."
             )
 
+    def rebind(self, model: "mujoco.MjModel") -> None:
+        """Adopt a new model, after the envs rebuilt their world.
+
+        A caller that swaps geometry (``set_layout``) leaves every env holding a
+        freshly compiled MjModel while this renderer still holds the old one --
+        and ``mj_copyData`` would then be copying between two different models.
+        Rebuilding the context is the honest fix; it is affordable because a
+        world swap happens at a rollout boundary, not per step.
+        """
+        self.model = model
+        if self._renderer is not None:
+            self._renderer.close()
+        self._renderer = mujoco.Renderer(model, height=self.height,
+                                         width=self.width)
+        self._scratch = mujoco.MjData(model)
+
     # -- rendering ---------------------------------------------------------
 
     def render(self, data: "mujoco.MjData", cam_name: str,
