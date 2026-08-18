@@ -189,16 +189,17 @@ def _generate_aviary_xml(
 
         # Add camera for vision
         if vision:
-            # fovy 90, not 60. On a square render the vertical half-extent visible
-            # at distance d is tan(fovy/2)*d, so at 60 a bar 2.53 below the cruise
-            # altitude only enters frame 4.4 units out -- two whole station
-            # spacings -- and the drone flies the entire final approach to every
-            # bar blind. 90 halves that standoff. It does NOT remove the memory
-            # requirement: the hardest transition (under blue 0.880, then over red
-            # 4.356) is still blind for the last full station spacing. Going wider
-            # would, and would also cost the angular resolution thin bars need --
-            # see mavrl.config.IMG_RES on why we raster at 512 and min-pool.
-            drone_bodies += f'      <camera name="{prefix}_cam" pos="0.02 0 0" xyaxes="0 -1 0 0 0 1" fovy="90"/>\n'
+            # fovy 60 is deliberate, not a default left unexamined. On a square
+            # render the vertical half-extent visible at distance d is tan(fovy/2)*d,
+            # so a bar 2.5 below the cruise altitude only enters frame about 4.4 out,
+            # two whole station spacings, and the drone flies the final approach to
+            # every bar blind. That is the task, not a bug in it: the policy is
+            # supposed to see the course early and hold it in memory. Widening this
+            # turns a memory problem into a reactive one, and costs the angular
+            # resolution thin bars need (see mavrl.config.IMG_RES on why we raster at
+            # 512 and min-pool). Changing it invalidates every collected frame, so
+            # the SeVAE and memory checkpoints would have to be retrained.
+            drone_bodies += f'      <camera name="{prefix}_cam" pos="0.02 0 0" xyaxes="0 -1 0 0 0 1" fovy="60"/>\n'
 
         drone_bodies += "    </body>\n"
 
