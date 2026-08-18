@@ -96,11 +96,26 @@ class CascadedPilot:
     #: behaviour the policy is supposed to learn.
     CLIMB_SLOWDOWN = 0.55
 
+    #: The pilot's own speed cap, per world axis, well under C.V_MAX = 3.0.
+    #:
+    #: This is a BC-data decision, not a flight-envelope one. At V_MAX the
+    #: teacher spends its whole run against the acceleration limit (see kp_vel
+    #: below), so the demonstrations are bang-bang and there is nothing in the
+    #: middle for a Gaussian policy to regress onto. Cruising at 1.3 keeps the
+    #: commanded acceleration inside +-1 and the labels smooth.
+    #:
+    #: Z is looser because a blue@0.880 -> red@4.356 pair is a 3.9-unit climb
+    #: inside one 2.20 spacing; capping it as hard as the horizontal axes would
+    #: make that pair unflyable rather than merely slow.
+    V_CRUISE = (1.3, 1.3, 2.0)
+
     def __init__(self, kp_pos: float = 1.6, kp_vel: float = 2.5,
                  kp_yaw: float = 2.0, brake_safety=None,
-                 climb_slowdown: Optional[float] = None):
+                 climb_slowdown: Optional[float] = None,
+                 v_cruise=None):
         self.kp_pos = kp_pos
         self.kp_vel = kp_vel
+        self.v_cruise = (self.V_CRUISE if v_cruise is None else v_cruise)
         self.kp_yaw = kp_yaw
         self.brake_safety = np.asarray(
             brake_safety if brake_safety is not None else self.BRAKE_SAFETY,
@@ -110,7 +125,7 @@ class CascadedPilot:
 
     def _velocity_target(self, err: np.ndarray) -> np.ndarray:
         a_max = np.array(C.A_MAX)
-        v_max = np.array(C.V_MAX)
+        v_max = np.minimum(np.array(C.V_MAX), np.array(self.v_cruise))
         v_brake = self.brake_safety * np.sqrt(2.0 * a_max * np.abs(err))
         speed = np.minimum(np.abs(self.kp_pos * err),
                            np.minimum(v_max, v_brake))
@@ -166,13 +181,21 @@ class CascadedPilot:
                                sz * v_des[0] + cz * v_des[1],
                                v_des[2]])
 
-        # Drive the env's velocity integrator directly rather than through a
-        # second P loop. The env holds v_cmd and adds `action * A_MAX * dt` to
-        # it each policy step; asking for exactly the acceleration that lands
-        # v_cmd on v_des removes an entire lag from the chain. Guessing at it
-        # with P-on-velocity-error instead is what produced the lateral
-        # overshoot to x = -1.02 against an opening edge at -0.44.
-        a_body = (v_des_body - env.v_cmd_body) / C.POLICY_DT
+        # P on velocity error, NOT deadbeat. `(v_des - v_cmd) / POLICY_DT` is
+        # gain 10/s: it demands the whole error be erased in one policy step,
+        # which saturates the action at +-1 for any error above A_MAX*dt =
+        # 0.40 units/s. Measured spin-up from rest to 3.0 was seven consecutive
+        # steps at exactly +1.00, then 0.00 -- bang-bang. Those are unlearnable
+        # BC targets: regressing a Gaussian on a two-valued signal returns the
+        # mean, which is the collapse the check at the end of bc.py warns about.
+        #
+        # kp_vel = 2.5 saturates only above 1.6 units/s, so paired with
+        # V_CRUISE the teacher stays in its linear region and the labels carry
+        # real structure. The overshoot that motivated deadbeat (lateral
+        # excursion to x = -1.02 against an opening edge at -0.44) came from a
+        # soft gain at *full* cruise; the speed cap is what makes this safe, so
+        # the two changes only work together. Watch the completion rate.
+        a_body = self.kp_vel * (v_des_body - env.v_cmd_body)
 
         yaw_err = math.atan2(math.sin(YAW_DOWN_COURSE - yaw),
                              math.cos(YAW_DOWN_COURSE - yaw))
@@ -274,9 +297,11 @@ def collect_worker(args, worker_id: int, n_episodes: int,
         if len(frames["image"]) == 0:
             continue
 
-        writer.add_episode(frames, layout.describe(), source="scripted")
+        success = bool(info.get("is_success", False))
+        writer.add_episode(frames, layout.describe(), source="scripted",
+                           success=success)
         kept += 1
-        completed += int(info.get("is_success", False))
+        completed += int(success)
         if progress is not None:
             progress.put(1)
         if (ep + 1) % 50 == 0 or args.gui:

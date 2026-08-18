@@ -100,6 +100,27 @@ K_SMOOTH = 0.01
 #: Retreating is deliberately NOT clipped: backing away from the waypoint costs
 #: the full distance, so the cap cannot be farmed by oscillating.
 V_PROG_CAP = 1.3
+
+#: Hard end of the speed band. Between V_PROG_CAP and this, speed is free but
+#: unpaid; above it, it costs K_OVERSPEED per unit of excess per policy step.
+#:
+#: Measured on the HORIZONTAL speed only. Vertical is left alone deliberately:
+#: a blue@0.880 -> red@4.356 pair is a 3.9-unit climb inside one 2.20 spacing,
+#: so a penalty on total speed would punish the climb the course itself
+#: demands. What we are limiting is how fast it travels down the corridor.
+#:
+#: Applied only while the course is unfinished. Crossing the last gate ends the
+#: episode and pays K_TBONUS with no ceiling, so a completed run is still
+#: rewarded for every second saved no matter how fast it flew.
+V_SPEED_LIMIT = 1.7
+
+#: Penalty per policy step per unit of horizontal speed above V_SPEED_LIMIT.
+#:
+#: 0.5 puts 2.0 units/s at 0.15/step (0.5/s of flight, ~1.7x K_TIME) and the
+#: 3.0 ceiling at 0.65/step (6.5/s, ~22x K_TIME). So drifting just over the
+#: line is a nudge and flat out is unaffordable, which is the shape we want:
+#: the band is 1.3-1.7, not a wall at 1.7.
+K_OVERSPEED = 0.5
 K_CENTER = 0.1
 CENTER_BAND = 2.2            # apply the centering term within one station spacing
 
@@ -135,6 +156,28 @@ R_FINISH = 100.0
 #: terminal-reason mix: `collision` dominating means raise it, `timeout`
 #: dominating means it is already too high.
 R_CRASH = 40.0
+
+#: Leaving the course *sideways or backwards*. Twice R_CRASH on purpose.
+#:
+#: These used to cost the same as hitting a bar, which made them
+#: interchangeable, and peeling off sideways is the cheaper way to end an
+#: episode you have decided is lost: it is available from anywhere, at any
+#: speed, while a crash at least requires committing to the gate first. In a
+#: real venue they are not interchangeable -- clipping a bar is a failed
+#: attempt, leaving the course sideways is a drone in the crowd. 80 makes
+#: flying into the obstacle strictly preferable to flying out of the arena.
+R_STRAY = 80.0
+
+#: Which terminal reasons R_STRAY applies to, rather than R_CRASH.
+#:
+#: Deliberately NOT the whole out-of-bounds family. Overshooting forward past
+#: the exit, or climbing out of the room, is priced as an ordinary crash: the
+#: drone got all the way down the course to do it, and penalising that at the
+#: sideways rate would punish exactly the runs that came closest to finishing.
+#: What earns the doubled penalty is going somewhere the course never went --
+#: out the side, or back the way it came.
+STRAY_REASONS = ("out_of_corridor", "backwards")
+
 K_TBONUS = 5.0
 
 #: Terminate past the entry wall if |x| exceeds this. The red bar spans

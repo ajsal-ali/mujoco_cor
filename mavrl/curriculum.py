@@ -115,8 +115,20 @@ class CourseSampler:
                 # the identical layout anyway would rebuild every worker's
                 # MjModel -- and its GL context -- for nothing.
                 return None
-            self.state.layout = resample_heights(
-                self.rng, self.state.layout, self.split)
+            if self.state.stage >= self.max_stage:
+                # Terminal stage: resample the colour order too.
+                #
+                # Heights-only is right while the curriculum is still moving --
+                # a stage change is what varies colour order, and varying both
+                # at once makes an improvement unattributable. But at the top
+                # stage no further advance ever comes, so heights-only freezes
+                # the colour sequence for the entire run and the policy can
+                # memorise "up, down, up" instead of learning that red means
+                # above. Anyone training with --stage 3 sits here from step 0.
+                self.state.layout = self._sample()
+            else:
+                self.state.layout = resample_heights(
+                    self.rng, self.state.layout, self.split)
             return self.state.layout
 
         return None

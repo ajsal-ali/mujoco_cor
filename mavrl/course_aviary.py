@@ -315,10 +315,18 @@ class CourseAviary(BaseAviary):
                 # here rather than with geometry so the obstacle set stays
                 # exactly the competition's.
                 crash, reason = True, "out_of_corridor"
-            elif (abs(pos[0]) > 7.5 or pos[2] > 7.0
-                  # more than 4 past the exit, or 6 back behind the entry
-                  or TRAVEL_SIGN * (pos[1] - EXIT_Y) > 4.0
-                  or TRAVEL_SIGN * (pos[1] - ENTRY_Y) < -6.0):
+            elif abs(pos[0]) > 7.5:
+                # Also sideways, but from before the entry wall, where
+                # CORRIDOR_X_LIMIT does not apply yet. Same offence.
+                crash, reason = True, "out_of_corridor"
+            elif TRAVEL_SIGN * (pos[1] - ENTRY_Y) < -6.0:
+                crash, reason = True, "backwards"
+            elif pos[2] > 7.0 or TRAVEL_SIGN * (pos[1] - EXIT_Y) > 4.0:
+                # Overshoot: ran on more than 4 past the exit, or climbed out
+                # of the room. Split from the two above because it is a
+                # different failure -- the drone got all the way down the
+                # course to do this, so it is priced as a crash, not as
+                # straying.
                 crash, reason = True, "out_of_bounds"
 
         if crash:
@@ -328,7 +336,13 @@ class CourseAviary(BaseAviary):
             else:
                 self._crashed = True
                 self._terminal_reason = reason
-                reward -= C.R_CRASH
+                # Going out the side or backwards costs more than hitting
+                # something. Both end the episode, so without the split the
+                # policy picks whichever exit is easier to reach, and sideways
+                # is always easier than committing to a gate. Overshooting the
+                # exit is not in that set -- see C.STRAY_REASONS.
+                reward -= (C.R_STRAY if reason in C.STRAY_REASONS
+                           else C.R_CRASH)
 
         self.prev_pos = pos.copy()
         return float(reward)
@@ -391,6 +405,16 @@ class CourseAviary(BaseAviary):
         # than in _computeReward, which runs CTRL_PER_POLICY times -- otherwise
         # K_YAW would silently be six times what it says.
         total_reward -= C.K_YAW * abs(self.heading_error())
+        # Speed band: free up to V_PROG_CAP (which is where progress credit
+        # stops accruing), unpaid but unpunished to V_SPEED_LIMIT, penalised
+        # above it. Horizontal only -- the vertical axis has to stay free for
+        # the climbs the station spacing forces. Suppressed once the course is
+        # finished, so the uncapped completion bonus is never clawed back from
+        # a run that was fast *and* made it.
+        if not self._success:
+            v_horiz = float(np.linalg.norm(self.vel[0][:2]))
+            total_reward -= C.K_OVERSPEED * max(
+                0.0, v_horiz - C.V_SPEED_LIMIT)
         self.prev_action = self.cur_action.copy()
 
         info = self._computeInfo()
