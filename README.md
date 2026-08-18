@@ -162,72 +162,8 @@ and colour survive, fine detail does not.
 
 ### Policy
 
-**Still training. It does not work yet, and the current checkpoint is not worth
-using.**
-
-The first serious PPO run reached 448k steps at the full three-bar course and
-converged to a degenerate strategy: cross the entry window at full speed and
-crash into the first bar. Success rate 0.00, gate fraction pinned at exactly 0.2
-(one gate of five, the entry wall) for the entire run, episodes ending after 3.2
-seconds against a 39 second limit.
-
-The arithmetic explains it. A gate was worth 30, a crash cost 25, so reaching
-the first gate and dying scored about +8 and nothing the policy could actually
-reach scored better. That is a reward bug, but it is a symptom rather than the
-cause: a policy capable of finishing scores about +260, and no agent prefers +8
-to +260 unless +260 is out of reach.
-
-The real cause was upstream, and there were three of them.
-
-1. **Behaviour cloning was never validated.** It logged training MSE and nothing
-   else. Loss fell to 0.016 and looked fine. The checkpoint flew into the first
-   bar, which the PPO run then spent 448k steps rediscovering. Training loss
-   cannot see covariate shift, and covariate shift is the entire failure mode of
-   BC on an action space that feeds an integrator.
-
-2. **The scripted teacher was a deadbeat controller.** It asked for the whole
-   velocity error to be erased in a single policy step, which saturates the
-   acceleration command at its limit for any error above 0.40 units/s. Measured
-   spin-up from rest was seven consecutive steps at exactly +1.00, then 0.00.
-   Those are bang-bang labels, and regressing a Gaussian policy onto a
-   two-valued signal returns the mean.
-
-3. **BC cloned the teacher's failures.** The collector deliberately keeps flying
-   after a missed gate, because the VAE needs failure states in its training
-   set. Nothing recorded which episodes the pilot actually completed, so BC
-   treated the crashes as demonstrations.
-
-All three are fixed in the current tree. The teacher now runs a proper P loop on
-velocity error with its own cruise cap, which keeps its commands inside the
-linear region and its worst-case action at 0.81 instead of saturated. Episodes
-carry a success flag through to the shards. BC has an episode-level validation
-split, selects its checkpoint on validation rather than training loss, flies
-the policy periodically during training as the only measurement that catches
-covariate shift, and trains the head against a frozen memory before unfreezing
-the memory at a much lower learning rate.
-
-The reward was retuned alongside. A crash now costs more than the gate it was
-reaching for, so a marginal attempt is no longer free. Peeling off sideways, or turning back,
-costs twice a crash: those used to be priced identically, and leaving the course
-is the cheaper way to abandon an episode from any position, while committing to
-a gate and clipping it at least required flying the course. Overshooting past
-the exit is deliberately left at the crash price, since a drone that got that
-far should not be penalised as though it had flown into the crowd. Speed is
-paid up to 1.3 units/s, free but unpaid to 1.7, and penalised above that, with
-the whole band suppressed once the course is finished so that a run which is
-both fast and complete still collects an uncapped time bonus. And heading now
-carries a penalty at all, which it did not before: yaw is a real action feeding
-an integrator with no restoring term, and absolute heading is not in the
-observation, so any constant bias on it simply accumulated all episode.
-
-The camera field of view also went from 60 to 90 degrees. At 60 a bar 2.5 units
-below the cruise altitude only entered frame two full station spacings out. 90
-halves that without going so wide that thin bars stop resolving, and it does not
-remove the memory requirement: the hardest transition is still blind for the
-last full station spacing.
-
-Data is being regenerated and the VAE and memory models retrained against it,
-since the field of view change makes every previously collected frame stale.
+The policy itself is still being trained. That work is ongoing and the
+results are not settled, so nothing is reported here yet.
 
 ## Layout
 
@@ -312,6 +248,12 @@ usable; see `multi_drone_mujoco/`.
 - Yu, Ferranti et al. *MAVRL: Learn to Fly in Cluttered Environments with
   Varying Speed.* RA-L 2025. https://github.com/tudelft/mavrl
 - MuJoCo Menagerie, for the Bitcraze Crazyflie 2.x MJCF model.
+
+## Status
+
+Active work in progress. The environment, the encoder and the memory model are
+in place, and the policy is still being experimented with and trained. Nothing
+here should be treated as finished or used as-is yet.
 
 ## License
 
