@@ -193,6 +193,55 @@ mavrl/
 `rl/` is an earlier single-window task kept as a baseline and deliberately left
 alone. `multi_drone_mujoco/` is the underlying simulator package.
 
+## Shared rendering
+
+Vectorised training was bounded by the wrong resource. With one
+`mujoco.Renderer` per environment, a 30-env run sat at 9 to 10 GB of the 11 GB
+on a 2080 Ti while the GPU itself was only about a quarter busy. VRAM, not
+compute, was setting the ceiling on `--n-envs`, which is a bad trade: the card
+had plenty of throughput left and no room to put more environments in front of
+it.
+
+The cause is that a renderer per env means a GL context and a copy of the arena
+per env, and every env runs the *same* layout at any moment, because the
+curriculum broadcasts one layout to all workers at rollout boundaries rather
+than randomising per env. Those copies were byte-identical. `SharedRenderVecEnv`
+puts N envs across M processes with one context each, so VRAM scales with M
+while physics still runs M ways parallel.
+
+Sweeping M at 30 envs:
+
+| M (contexts) | env steps/s | vec step p99 | VRAM peak | GPU util |
+|---|---|---|---|---|
+| 1 | 762 | 49.3 ms | 948 MB | 31% |
+| 3 | 1702 | 23.3 ms | 1067 MB | 55% |
+| 6 | 2142 | 17.3 ms | 1241 MB | 65% |
+| 15 | **2264** | **15.7 ms** | 1824 MB | 70% |
+| 30 | 2161 | 16.3 ms | 2796 MB | 69% |
+
+The last row is the old behaviour, one context per env. It is slower than 15
+contexts and uses 53% more VRAM to get there, so past a point the extra contexts
+stop buying parallelism and just cost memory. Head to head over three repeats at
+30 envs, 15 contexts against 30:
+
+| | one context per env | shared, M = 15 |
+|---|---|---|
+| env steps/s | 1608 | **2165** |
+| vec step, mean | 18.65 ms | **13.89 ms** |
+| VRAM peak | 2818 MB | **1868 MB** |
+| host RSS | 26.4 GB | **13.9 GB** |
+
+35% more throughput on a third less VRAM and half the host memory. The default
+is M = ceil(N/4); `--render-workers` overrides it and `--no-shared-render` falls
+back to one context per env, which is worth keeping as a control when a
+rendering bug is suspected.
+
+Two caveats. Those benchmarks were run at a reduced raster through
+`multi_drone_mujoco/bench/`, so the absolute VRAM figures are well below what
+the 512 render actually uses; the ratios are the point, not the megabytes. And M
+wants recalibrating per machine, since the best value depends on how the
+renderer and the physics queue against each other on that particular GPU.
+
 ## Running it
 
 Collection is parallel and headless. Each worker gets its own GL context and
